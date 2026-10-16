@@ -1,0 +1,27 @@
+{
+  "name": "hired",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Personal referral outreach agent — a local, zero-cost automation that gets me referrals for jobs matching my profile.",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "build": "pnpm -r build",
+    "dev:server": "pnpm --filter server dev",
+    "dev:web": "pnpm --filter web dev",
+    "build:extension": "pnpm --filter extension build",
+    "migrate": "pnpm --filter server migrate",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
