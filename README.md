@@ -10,7 +10,7 @@ A local, zero-cost personal agent that gets me referrals for jobs I'd be a stron
 
 - **Scrapes jobs** from my Happy Agent inbox (filtered by my profile) via a Chrome extension.
 - **Discovers contacts** at each hiring company via Google X-ray search (SerpAPI).
-- **Finds and verifies emails** (Hunter + Reoon), only sends to verified addresses.
+- **Finds and verifies emails** (Snov + Reoon, with a pattern-generate fallback), only sends to verified addresses.
 - **Drafts outreach** using static templates with variable substitution (Gemini only for reply classification, not drafting).
 - **Dispatches Gmail** in the background after I pick who to contact in a review modal.
 - **Queues LinkedIn** actions for one-click human send (no scripted LinkedIn traffic — my real account stays clean).
@@ -60,7 +60,7 @@ Follow [`tasks.md § Phase 0`](.kiro/specs/hired/tasks.md) to register API keys 
 
 - Google Cloud Console (Gmail + Gemini)
 - SerpAPI (250 searches/mo, no card required)
-- Hunter.io (50 credits/mo)
+- Snov.io (50 credits/mo, accepts gmail signup)
 - Reoon (600 verifications/mo)
 
 Then from the workspace root:

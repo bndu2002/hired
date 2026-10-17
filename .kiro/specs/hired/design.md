@@ -58,7 +58,7 @@ This document describes *how* v1 is built: architecture, data model, the three p
      │                                                             │
      │  ┌─────────────┐  ┌─────────────┐  ┌───────────────────┐   │
      │  │ Postgres    │  │ Gmail API   │  │ Gemini / SerpAPI /│   │
-     │  │ (local)     │  │ (OAuth2)    │  │ Hunter / Reoon    │   │
+     │  │ (local)     │  │ (OAuth2)    │  │ Snov / Reoon      │   │
      │  └─────────────┘  └─────────────┘  └───────────────────┘   │
      └────────────────────────────────────────────────────────────┘
 ```
@@ -150,7 +150,8 @@ hired/                                   workspace root
 │   │   │   │   │       └── contract.test.ts       runs against every registered adapter
 │   │   │   │   ├── emailFinder/
 │   │   │   │   │   ├── EmailFinder.ts
-│   │   │   │   │   ├── HunterFinder.ts
+│   │   │   │   │   ├── SnovFinder.ts
+│   │   │   │   │   ├── PatternHeuristicFinder.ts   ← no-signup fallback via Reoon
 │   │   │   │   │   └── __tests__/contract.test.ts
 │   │   │   │   └── emailVerifier/
 │   │   │   │       ├── EmailVerifier.ts
@@ -455,7 +456,7 @@ export type EmailFindResult = {
 };
 
 export interface EmailFinder {
-  readonly name: string;             // e.g. 'hunter'
+  readonly name: string;             // e.g. 'snov'
   readonly kind: 'email_finder';
   find(input: EmailFindInput): Promise<EmailFindResult | null>;
   estimateCreditsRemaining(): Promise<number | null>;
@@ -721,7 +722,7 @@ Target coverage: 80%+ on `core/`, 60%+ on `adapters/` and `services/`, zero targ
 - All `/api/*` routes require `X-Hired-Secret: <token>` header. Token is in `.env`, generated once (`openssl rand -hex 32`). Extension stores it in `chrome.storage.local`.
 - Gmail OAuth tokens stored in Postgres `oauth_tokens` table, column-encrypted via `pgcrypto` with a key derived from `.env`.
 - `.env` is `.gitignore`d. `.env.example` lists required vars with placeholder values.
-- No telemetry phones home. The only outbound HTTPS is to Gmail, Gemini, SerpAPI, Hunter, Reoon.
+- No telemetry phones home. The only outbound HTTPS is to Gmail, Gemini, SerpAPI, Snov, Reoon.
 
 ---
 
@@ -785,8 +786,9 @@ GEMINI_API_KEY=
 # Discovery
 SERPAPI_API_KEY=
 
-# Email finder
-HUNTER_API_KEY=
+# Email finder — Snov uses OAuth2 client credentials, not a single API key
+SNOV_CLIENT_ID=
+SNOV_CLIENT_SECRET=
 
 # Email verifier
 REOON_API_KEY=
