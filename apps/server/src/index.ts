@@ -9,11 +9,19 @@
  */
 
 import express from 'express';
+import { SerpApiXRaySource } from './adapters/discovery/SerpApiXRaySource.js';
 import { config } from './config/index.js';
 import { logger } from './logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { sharedSecret } from './middleware/sharedSecret.js';
+import { agentRouter } from './routes/agent.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
+import { discoveryRegistry } from './services/providerRegistry.js';
+
+// Register adapters once at module load. Keeping this at module scope (not
+// inside createApp) means a single registration applies across tests + prod,
+// and tests can clear or override by re-importing the registry module.
+discoveryRegistry.register(new SerpApiXRaySource(config.SERPAPI_API_KEY));
 
 export function createApp(): express.Express {
   const app = express();
@@ -56,6 +64,7 @@ export function createApp(): express.Express {
   app.use('/api', sharedSecret);
 
   app.use('/api/jobs', jobsRouter);
+  app.use('/api/agent', agentRouter);
 
   app.use(errorHandler);
 
