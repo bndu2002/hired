@@ -34,10 +34,10 @@ This document describes *how* v1 is built: architecture, data model, the three p
      │                     Browser (Chrome)                          │
      │                                                                │
      │  ┌─────────────────┐           ┌──────────────────────────┐  │
-     │  │ Happy Agent tab │◄──scrape──│  Hired Chrome Extension  │  │
-     │  │ (platform.      │           │  (MV3)                   │  │
-     │  │  uplers.com)    │  content  │                          │  │
-     │  └─────────────────┘  script   │  content/uplers.ts       │  │
+     │  │ Happy Agent tab │◄─Alt+H───►│  Hired Chrome Extension  │  │
+     │  │ (platform.      │  on-demand│  (MV3)                   │  │
+     │  │  uplers.com)    │  scrape   │                          │  │
+     │  └─────────────────┘  (D10)    │  content/uplers.ts       │  │
      │                                │  content/linkedin.ts     │  │
      │  ┌─────────────────┐           │  background.ts           │  │
      │  │ LinkedIn tab    │◄─────────►│                          │  │
@@ -79,6 +79,8 @@ The decisions below drove the whole design. They're referenced by number across 
 - **D6 — Hard caps.** 4 runs/day enforced server-side. 1-8 contacts/job, user-selectable at modal time.
 - **D7 — Single Node process + `node-cron`.** No queue infra, no scheduler service. Single user, 16 actions/day max — don't pay complexity for scale that will never arrive.
 - **D8 — Monorepo (pnpm workspaces).** Three apps + one shared-types package. Shared types are the single biggest correctness win and worth the small tooling overhead.
+- **D9 — Chrome extension stealth model.** The content script injects no DOM into Happy Agent until the user explicitly presses `Alt+H`. All visual feedback (toasts) renders inside a *closed* Shadow DOM (`attachShadow({ mode: 'closed' })`), so Happy's JS cannot `querySelector` into it. Why: (a) nothing for Happy to passively detect — no classes, no attributes, no event handlers on their DOM; (b) screensharing / screenshots / shoulder-surfing show no trace of the tool. Trade-off: no visually discoverable button; the hotkey has to be memorable. Changed from v1 draft: an always-visible "Run via Hired" button was replaced with the hotkey model after a direct conversation on fingerprinting risk.
+- **D10 — On-demand capture, not batch sync.** Jobs enter our Postgres one at a time, at the moment the user Alt+H's the focused Happy detail. The dashboard has no Jobs browser. Why: Happy's catalog is 1k+ entries refreshing continuously; replicating it would duplicate data we don't need and compete with Happy at its strongest feature. Our value is the orchestration *around* jobs the user chose, not catalog curation. Trade-off: no "jobs I bookmarked but haven't run" view in our dashboard — use Happy's bookmark for that. Changed from v1 draft: a dashboard Jobs browser modeled on Happy's two-pane layout was dropped.
 
 ---
 
@@ -161,7 +163,7 @@ hired/                                   workspace root
 │   │   │   │   ├── gemini.ts            template render + intent classify
 │   │   │   │   └── linkedinAssist.ts    draft creation (no sending)
 │   │   │   ├── routes/
-│   │   │   │   ├── jobs.routes.ts       POST /api/jobs/sync, GET /api/jobs
+│   │   │   │   ├── jobs.routes.ts       POST /api/jobs/run-via-hired, GET /api/jobs
 │   │   │   │   ├── agent.routes.ts      POST /api/agent/run, POST /api/agent/send
 │   │   │   │   ├── contacts.routes.ts   GET /api/contacts, PATCH /api/contacts/:id
 │   │   │   │   ├── linkedinQueue.routes.ts
@@ -186,7 +188,7 @@ hired/                                   workspace root
 │   │   │   │   └── linkedin.ts          assist mode (D1)
 │   │   │   ├── shared/                  types + API client
 │   │   │   │   └── api.ts
-│   │   │   └── popup/                   small UI for sync button + queue counts
+│   │   │   └── popup/                   one-time shared-secret entry + server health check
 │   │   ├── manifest.json
 │   │   ├── public/
 │   │   ├── vite.config.ts               @crxjs/vite-plugin for MV3 builds
@@ -513,7 +515,9 @@ The orchestrator never names an adapter directly. It calls `discoveryRegistry.re
 
 The core service lives in `services/orchestrator.ts`. HTTP routes are thin wrappers. Here's the full flow in prose + state:
 
-### Phase A — User opens the modal (`POST /api/agent/discover`)
+### Phase A — Modal opens, discovery runs (`POST /api/agent/discover`)
+
+**How we arrive here:** user pressed `Alt+H` on a Happy Agent job detail (D9/D10). The extension already upserted the `jobs` row via `POST /api/jobs/run-via-hired`. The background worker then opens or focuses the Hired dashboard tab at `/run/:jobId`, which triggers this endpoint.
 
 Input: `{ jobId, channels: ['gmail' | 'linkedin' | 'both'] }`
 
@@ -647,7 +651,16 @@ Retry with exponential backoff on quota errors. Fallback to `{ sentiment: 'NEGAT
 
 MV3 service worker + two content scripts.
 
-**`content/uplers.ts`** — injected on `platform.uplers.com/talent/*`. Adds a floating "Sync to Hired" button near the top of the jobs page. Click → scrape visible cards, POST to `http://127.0.0.1:4000/api/jobs/sync` with the shared-secret header.
+**`content/uplers.ts`** — injected on `platform.uplers.com/*`. **Stealth model per D9**: adds nothing to Happy's DOM at load time. Registers a `chrome.runtime.onMessage` listener for the `run-via-hired` command. When that fires:
+  1. Reads the focused job detail pane via `document.getElementById('jobDetailSectionHead')` as a stable anchor. Extracts title, company, URL (which is actually the LinkedIn posting URL via `.job-role-title-link`), description (from `#hsContent`, HTML-stripped to plain text with paragraph breaks preserved), must-have / good-to-have skills, exp range, location hint, posted hint, and Happy's internal `?activeJob=` ID.
+  2. Sends a `post-run-via-hired` message to the background service worker with the scraped payload.
+  3. Renders a brief (2-3s) Shadow-DOM toast confirming success / failure.
+
+**Hotkey plumbing (`background.ts`)** — registers a `chrome.commands` listener. On `Alt+H` (default; user-reconfigurable at `chrome://extensions/shortcuts`): checks the active tab is on `platform.uplers.com`; if so, forwards `run-via-hired` to the content script. If not, silently ignores (doesn't flash anything or hint the extension exists).
+
+**Fetch proxy (`background.ts`)** — content scripts in MV3 are subject to CORS, so the content script asks the background worker to make the `POST /api/jobs/run-via-hired` call. Background reads the shared secret from `chrome.storage.local`, attaches it as `X-Hired-Secret`, and relays the response back.
+
+**Popup (`popup.html` + `popup/index.ts`)** — minimal UI, 340px wide. One password input for the shared secret, Save button, Test server button (hits `/api/health`). Shown when the user clicks the Hired toolbar icon. This is the only entry point for the one-time secret setup; after that the user never needs to open it again.
 
 **`content/linkedin.ts`** — injected on `linkedin.com/*`. Dual-mode by current URL:
 - `linkedin.com/in/*` (profile) → read sent-state when queue is active.
@@ -698,7 +711,7 @@ Target coverage: 80%+ on `core/`, 60%+ on `adapters/` and `services/`, zero targ
 - **Structured logs** via Pino. Every log line has `requestId` (if HTTP) or `runId` / `contactId` (if background). No PII in log messages — reference by ID.
 - **Events table IS observability**. For any contact, `SELECT * FROM events WHERE contact_id = X ORDER BY created_at` tells you the full story.
 - **Dashboard shows adapter credit telemetry**. A sidebar card lists each registered adapter with "N / M credits used this month." Visual signal when a plug is about to deplete.
-- **Dead-scrape alarm**. If a Happy Agent sync returns 0 jobs, raise a dashboard banner. Markup drift is the single most likely failure mode.
+- **Scrape health signal**. The on-demand capture model (D10) means markup drift surfaces immediately — any Alt+H that returns an error toast tells you selectors have broken. No separate "dead-scrape" monitoring needed since every scrape is user-initiated and user-observed.
 
 ---
 
@@ -728,8 +741,8 @@ Target coverage: 80%+ on `core/`, 60%+ on `adapters/` and `services/`, zero targ
 ### A. HTTP routes (full list)
 
 ```
-POST   /api/jobs/sync                 extension → server; scraped jobs batch
-GET    /api/jobs                      list jobs with latest run status
+POST   /api/jobs/run-via-hired        extension → server; one scraped job (D10). Upserts by job_url.
+GET    /api/jobs                      list recent jobs (dashboard)
 GET    /api/jobs/:id                  single job detail
 
 POST   /api/agent/discover            start a run (opens modal)   returns { runId, contacts }

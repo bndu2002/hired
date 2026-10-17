@@ -86,11 +86,10 @@ pnpm --filter extension build # loads from apps/extension/dist in Chrome
 
 ### Daily use (once v1 ships)
 
-1. Open Happy Agent in Chrome → click "Sync to Hired" button → jobs land in the dashboard.
-2. Open the Hired dashboard (`localhost:5173`) → pick 4 jobs → Run Agent on each.
-3. For each run: review discovered contacts in the modal, uncheck anyone who looks wrong, click Send.
-4. Open LinkedIn Queue once a day → process pending Connects and DMs (one click per contact).
-5. Check Responses tab for replies. Mark the ones that led to interviews.
+1. Open Happy Agent in Chrome, click into any job that fits → press **Alt+H**. The job is captured into the local DB and the Run Agent modal opens in the Hired dashboard. Repeat for up to 4 jobs (the daily cap).
+2. For each run: review discovered contacts in the modal, uncheck anyone who looks wrong, click Send.
+3. Open LinkedIn Queue once a day → process pending Connects and DMs (one click per contact).
+4. Check Responses tab for replies. Mark the ones that led to interviews.
 
 Expected daily cost: ≤ 15 min total.
 

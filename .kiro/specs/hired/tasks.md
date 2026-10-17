@@ -100,19 +100,23 @@ Checkbox discipline: tick a task only when its tests pass locally. "Done" phase 
 - [ ] Create `apps/web/` using `pnpm create vite . --template react-ts`
 - [ ] Add Tailwind: `pnpm add -D tailwindcss postcss autoprefixer`, run `tailwindcss init -p`
 - [ ] Add dependencies: react-router-dom@6, @tanstack/react-query, lucide-react, @hired/types
-- [ ] Create `apps/web/src/app/{layout.tsx, router.tsx}` with left sidebar + top bar skeleton matching Happy Agent's structure (nav items: Dashboard, Configure, My Activity, Jobs, LinkedIn Queue — Resumes/Help/Upgrade/Reminders hidden)
-- [ ] Create a placeholder `features/jobs/JobsPage.tsx` that renders "Jobs — coming in Phase 2"
+- [ ] Create `apps/web/src/app/{layout.tsx, router.tsx}` with left sidebar + top bar skeleton. Per D10 (no Jobs browser), nav items are: **Dashboard, My Activity, LinkedIn Queue, Configure**. (Resumes/Help/Upgrade/Reminders/Jobs hidden — Jobs tab was Happy Agent's; we don't rebuild it.)
+- [ ] Create placeholder pages for each nav item ("coming in Phase N")
+- [ ] Set up a `/run/:jobId` route — the Run Agent modal will mount here when the extension opens the dashboard tab post-Alt+H (Phase 3)
 - [ ] Boot web: `pnpm --filter web dev` → `localhost:5173` loads the shell
 
 **Test:** every nav link renders its placeholder page without a crash. Tailwind classes apply.
 
-### 1.6 Extension scaffold
+### 1.6 Extension scaffold ✓ (shipped with Phase 2.3)
 
-- [ ] Create `apps/extension/` with `package.json`
-- [ ] Install: `@crxjs/vite-plugin`, `vite`, `typescript`, `@hired/types`
-- [ ] Create `apps/extension/manifest.json` (MV3, permissions for `platform.uplers.com/*`, `linkedin.com/*`, `127.0.0.1:4000/*`, storage)
-- [ ] Create `apps/extension/src/background.ts` — service worker, just a `console.log('hired bg')` for now
-- [ ] Create `apps/extension/src/content/uplers.ts` — content script that logs "hired uplers content script" on Happy Agent page
+Scaffold was folded into Phase 2.3 since the stealth model (D9) replaced the originally planned always-visible button. See Phase 2.3 for the full built state.
+
+Historical reference for what was planned:
+- [x] Create `apps/extension/` with `package.json`
+- [x] Install: `@crxjs/vite-plugin`, `vite`, `typescript`, `@hired/types`
+- [x] Create `apps/extension/manifest.json` (MV3, permissions for `platform.uplers.com/*`, `linkedin.com/*`, `127.0.0.1:4000/*`, storage) — plus `commands.run-via-hired` for Alt+H
+- [x] Create `apps/extension/src/background.ts` — now also acts as fetch proxy for CORS
+- [x] Create `apps/extension/src/content/uplers.ts` — now the full stealth scraper, not a smoke-test log
 - [ ] Build: `pnpm --filter extension build` → outputs `apps/extension/dist/`
 - [ ] Chrome → Extensions → Developer mode ON → Load unpacked → point at `dist/`
 - [ ] Open any `platform.uplers.com` page → console shows the log
@@ -139,65 +143,46 @@ Checkbox discipline: tick a task only when its tests pass locally. "Done" phase 
 
 ---
 
-## Phase 2 — Jobs ingestion (Day 1 evening / Day 2 morning, ~4 hours)
+## Phase 2 — On-demand job capture via Alt+H (shipped)
 
-**Goal:** real jobs from Happy Agent land in Postgres and show up in the dashboard Jobs page.
+**Goal:** `Alt+H` on a focused Happy Agent job detail captures that one job into Postgres, with full metadata. No batch sync, no Jobs browser page (per D10 + D9).
 
-### 2.1 Shared types
+### 2.1 Shared types ✓
 
-- [ ] `packages/shared-types/src/Job.ts` — `Job` type and `SyncPayload` type (array of scraped job objects + sync metadata)
-- [ ] Export from `src/index.ts`
-- [ ] Rebuild: `pnpm --filter @hired/types build`
+- [x] `packages/shared-types/src/Job.ts` — `Job`, `JobSource`, `RunViaHiredPayload`, `RunViaHiredResponse` types
+- [x] Export from `src/index.ts`
 
-**Test:** server and web both type-check against `Job`.
+**Note:** `exactOptionalPropertyTypes: true` means payload fields use `?: T | undefined` (not `?: T`) because Zod's parse produces explicit undefined.
 
-### 2.2 Server: jobs API
+### 2.2 Server: run-via-hired endpoint ✓
 
-- [ ] `apps/server/src/db/repositories/job.repo.ts` — functions: `upsertJob(job)` (ON CONFLICT DO UPDATE), `listJobs(filters)`, `getJob(id)`
-- [ ] `apps/server/src/routes/jobs.routes.ts` — `POST /api/jobs/sync` (Zod-validate `SyncPayload`, upsert each job, respond with counts), `GET /api/jobs` (paginated), `GET /api/jobs/:id`
-- [ ] Mount in `src/index.ts`
+- [x] Migration `0002_job_extra_fields.sql` adds `happy_job_id`, `experience_range`, `location_hint`, `posted_hint`
+- [x] `apps/server/src/db/repositories/job.repo.ts` — `upsertByUrl(payload)` uses `ON CONFLICT (job_url) DO UPDATE` and returns `{ job, isNew }` via `(xmax = 0) AS was_insert`
+- [x] `apps/server/src/routes/jobs.routes.ts` — `POST /api/jobs/run-via-hired` (Zod-validated), `GET /api/jobs`, `GET /api/jobs/:id`
+- [x] Mount in `src/index.ts`
+- [x] CORS middleware allow-list for `chrome-extension://*` and `localhost:5173`
 
-**Tests:**
-- Unit: Zod schema rejects malformed payloads
-- Integration (with test DB): POST /api/jobs/sync inserts N rows; re-posting same payload is idempotent
+**Tests passing:** 7 config unit tests + manual curl verification (valid payload → `{jobId, isNew: true}`; same URL again → `isNew: false`; malformed → 400 with Zod errors).
 
-### 2.3 Extension: Happy Agent scraper
+### 2.3 Extension: Alt+H hotkey, stealth scraper, popup for secret ✓
 
-- [ ] `apps/extension/src/content/uplers.ts` — detects when on `/talent/jobs*` URL, injects a floating "Sync to Hired" button into the DOM near the Jobs list
-- [ ] Button click: query the visible job cards' DOM, extract `{company_name, job_title, job_url, job_description, must_have_skills, good_to_have_skills, source: 'happy_agent'}` per card
-- [ ] POST to `http://127.0.0.1:4000/api/jobs/sync` with `X-Hired-Secret` header (read from `chrome.storage.local`)
-- [ ] Visual feedback on button: pending / success / error state
+- [x] `apps/extension/manifest.json` — MV3, `host_permissions` for `platform.uplers.com/*` and `127.0.0.1:4000/*`, `commands.run-via-hired` bound to `Alt+H`, `action.default_popup = popup.html`
+- [x] `apps/extension/src/content/uplers.ts` — **no DOM injection by default** (D9). Scrapes focused detail pane on message. Anchors: `#jobDetailSectionHead` for the pane, `.job-role-title-link[href]` for jobTitle + LinkedIn URL, `.companyName` for company, `.must_have` + `.good_to_have > div` for skills, `.attrib` for experience/location, `.earlyApplicant` for posted hint, `#hsContent` for description (HTML-stripped to plain text preserving paragraph breaks).
+- [x] Closed Shadow DOM toast (`attachShadow({ mode: 'closed' })`) — Happy's `querySelector` cannot reach into it.
+- [x] `apps/extension/src/background.ts` — `chrome.commands` listener forwards hotkey; `chrome.runtime.onMessage` listener acts as fetch proxy to localhost (bypasses MV3 content-script CORS). Silently ignores hotkey on non-Happy tabs (D9).
+- [x] `apps/extension/popup.html` + `src/popup/index.ts` — password input for the shared secret → `chrome.storage.local`; "Test server" button hits `/api/health`.
 
-**Tests:**
-- Unit (via jsdom): parser extracts correct fields from a saved Happy Agent HTML fixture
-- Manual: load a real Happy Agent page, click button, verify server logs the POST and `SELECT * FROM jobs` shows rows
-
-### 2.4 Web: Jobs page
-
-- [ ] `features/jobs/JobsPage.tsx` — two-pane layout matching Happy Agent (SS4): list left, detail right
-- [ ] `features/jobs/JobCard.tsx` — company icon stand-in, title, skills chips
-- [ ] `features/jobs/JobDetail.tsx` — full description with Run Agent button (stub for Phase 3)
-- [ ] `shared/api/jobs.ts` — typed TanStack Query hooks (`useJobsList`, `useJob(id)`)
-- [ ] Jobs page polls server every 10s so new syncs show up without reload
-
-**Tests:**
-- Smoke: rendering with mocked data shows cards and detail
-- Manual: after Phase 2.3 sync, Jobs page shows the real jobs
-
-### 2.5 Dead-scrape alarm
-
-- [ ] In `/api/jobs/sync`: if payload is empty, write a `scrape_empty_payload` row to a lightweight `alerts` table (schema addition: see migration 0002) and return 200 with warning
-- [ ] Web shows a persistent red banner when any unacknowledged alert exists
-- [ ] `POST /api/alerts/:id/acknowledge` clears the banner
-
-**Test:** post empty payload → alert exists → banner shows → acknowledge → banner gone.
+**Tests:** manual E2E — `Alt+H` on a focused Happy job → DB row with full fields. Re-pressing on same job → `isNew: false`. Alt+H on non-Happy tab (e.g. google.com) → no toast, no network activity.
 
 ### Phase 2 acceptance criteria
 
-- [ ] One click on Happy Agent sync button → jobs appear in dashboard within 10s
-- [ ] Re-syncing is idempotent (no duplicate rows)
-- [ ] Empty payload raises visible alert
-- [ ] All Phase 2 tests pass
+- [x] Alt+H on a focused Happy Agent job detail inserts one row with full metadata
+- [x] Re-pressing on the same job updates the row in place (dedup via `job_url`)
+- [x] Extension injects nothing into Happy's DOM until Alt+H
+- [x] Toast confirms success/failure, lives inside closed Shadow DOM
+- [x] All server tests + manual E2E green
+
+**Shipped on branch `feat/jobs-capture`, merged to main in PR #1.**
 
 ---
 
@@ -512,27 +497,21 @@ Checkbox discipline: tick a task only when its tests pass locally. "Done" phase 
 - Component: renders known provider list
 - Integration: endpoint returns correct current state
 
-### 6.5 Dead-scrape alarm banner
+### 6.5 Toast notifications (dashboard side)
 
-- [ ] If any unacknowledged alert in `alerts` table, show red top banner
-- [ ] "Dismiss" button acknowledges
+- [ ] `shared/components/Toast.tsx` + `useToast` hook (the extension has its own Shadow-DOM toast; this is for in-dashboard events)
+- [ ] Fire toast on Send success/failure, on queue mark-sent, on reply classification
 
-(Already stubbed in Phase 2 — this is just polish on the UI.)
-
-### 6.6 Toast notifications
-
-- [ ] `shared/components/Toast.tsx` + `useToast` hook
-- [ ] Fire toast on Send success/failure, on sync success, on queue mark-sent
+(The old "dead-scrape alarm banner" item was removed with D10 — the on-demand capture model surfaces scrape failures in the extension toast immediately; no separate dashboard alarm needed.)
 
 **Tests:**
 - Component: toast shows, auto-dismisses after 5s
 
-### 6.7 First real batch
+### 6.6 First real batch
 
-- [ ] Sync real Happy Agent jobs
-- [ ] Run Agent on your top-3 jobs that match your profile best (hand-picked)
-- [ ] Review modal, send to high-quality contacts only (5-8 total messages across 3 jobs — stay within week-1 warm-up per D6)
-- [ ] Process the LinkedIn Queue batch (if any LinkedIn selections)
+- [ ] Alt+H on your top-3 Happy Agent jobs that match your profile best (hand-picked, not the first 3 you see)
+- [ ] Run Agent on each from the dashboard; review modal, send to high-quality contacts only (5-8 total messages across 3 jobs — stay within week-1 warm-up per D6)
+- [ ] Process the LinkedIn Queue (if any LinkedIn selections)
 - [ ] Monitor Responses tab over day 7-9 for replies
 
 **No automated tests — this is the live calibration.**
