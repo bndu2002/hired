@@ -32,9 +32,10 @@ Written in first person because v1 has one user.
 
 ### Job sourcing
 
-- I open Happy Agent in my browser. My **Hired** Chrome extension injects a sync button on the jobs page. One click POSTs the current list of jobs (with their descriptions, skills, URLs) to my local server. I don't do profile-matching logic myself — Happy already filtered by my profile and recency; I'm leveraging that.
-- In the **Hired** dashboard, I see those jobs in a Jobs browser modelled on Happy Agent's layout: left list, right detail, Run Agent as the primary CTA.
-- If I want to run the agent on a job that isn't on Happy Agent, I paste its URL into the "Paste Job Link" box.
+- I browse jobs on Happy Agent itself — it already filters by my profile and recency, I'm not going to rebuild that. The **Hired** Chrome extension is loaded but adds nothing to Happy's UI.
+- When I find a job worth pursuing, I press **Alt+H**. The extension's content script reads the focused job detail pane (title, company, URL, description, skills, metadata) and POSTs it to my local server. The server upserts one `jobs` row (deduped by `job_url`). A brief toast confirms the capture.
+- Only jobs I explicitly Alt+H'd end up in my local DB. Thousands of jobs I just scrolled past stay on Happy, not in my Postgres.
+- Paste-job-link flow (for jobs not on Happy) is deferred to v2.
 
 ### Running the agent
 
@@ -80,14 +81,14 @@ A full day of me using the tool should look like: open dashboard (0.5 min) → p
 
 ### In scope (v1)
 
-- Job scraping from Happy Agent via Chrome extension content script
-- Paste-job-link alternative input
+- **On-demand** job capture from Happy Agent via Chrome extension — one job at a time, triggered by `Alt+H` hotkey on the focused job detail
+- Chrome extension with **stealth model**: zero DOM injection on Happy, closed-Shadow-DOM toast feedback, one-time shared-secret entry via popup, background service worker as fetch proxy
 - Discovery (`DiscoverySource` pluggable interface, SerpAPI X-ray as the day-1 adapter)
 - Email finder (`EmailFinder` pluggable interface, Hunter as the day-1 adapter)
 - Email verifier (`EmailVerifier` pluggable interface, Reoon as the day-1 adapter)
 - Gmail OAuth2, outbound send with thread tracking, inbound 15-min poll
 - Gemini for template variable substitution and reply intent classification
-- Dashboard: Jobs, Run Agent modal, My Activity, Responses, LinkedIn Queue, Configure (Templates + Connected Accounts only)
+- Dashboard: Run Agent modal, My Activity, Responses, LinkedIn Queue, Configure (Templates + Connected Accounts only)
 - LinkedIn **assist mode**: pre-fill actions, human clicks, log sent-state
 - Daily cap: 4 referral runs, 1-8 contacts per job (user picks within the modal)
 - Append-only `events` table as source of truth; `contacts.*_status` columns are derived caches
@@ -95,6 +96,10 @@ A full day of me using the tool should look like: open dashboard (0.5 min) → p
 ### Explicitly out of scope (v1)
 
 - Scripted-automated clicking of LinkedIn Connect or DM Send (violates D1)
+- Dashboard **Jobs browser** page — Happy Agent itself is the catalog browser; our dashboard shows only jobs we've acted on (via My Activity)
+- Batch sync of Happy Agent's job list — we persist only jobs explicitly captured via Alt+H
+- Paste-job-link flow (deferred — would be v2; the extension hotkey covers 95%+ of use)
+- Dead-scrape alarm — no batch means no empty-sync-detection to do
 - Auto-reply to inbound messages
 - Auto-generated follow-up messages (first touch only in v1)
 - Resume tailoring per job (deferred — would be v2)
@@ -129,7 +134,8 @@ A full day of me using the tool should look like: open dashboard (0.5 min) → p
 
 The build is "done" (v1 shipped) when all of these pass:
 
-- [ ] One click on the Happy Agent jobs page syncs the current page's jobs into my Postgres DB. Zero extractions raises a dashboard alert instead of a silent success.
+- [ ] Alt+H on a focused Happy Agent job detail inserts one `jobs` row with full metadata (title, company, URL, description, skills, happy_job_id, experience_range, location_hint, posted_hint). Re-pressing Alt+H on the same job returns `isNew: false` and refreshes the row in place.
+- [ ] The Chrome extension injects nothing into Happy's DOM until Alt+H is pressed. The confirmation toast is rendered inside a closed Shadow DOM.
 - [ ] Run Agent on a job opens the modal, discovery runs, discovered contacts appear with verification signals, I can select/deselect and toggle per-contact channels, Send dispatches correctly.
 - [ ] Verified-email selections send via Gmail API with `thread_id` stored. Unverified selections never hit Gmail.
 - [ ] LinkedIn selections create drafts in the LinkedIn Queue → Connect tab. Alt+Enter flow works. Sent-state is detected and logged.
