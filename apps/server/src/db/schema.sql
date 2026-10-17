@@ -82,6 +82,11 @@ CREATE INDEX IF NOT EXISTS idx_contacts_run ON contacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_gmail_thread ON contacts(gmail_thread_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_linkedin_status ON contacts(linkedin_status);
 
+-- Partial: only rows with a linkedin_url, powering cross-run dedup lookups.
+CREATE INDEX IF NOT EXISTS idx_contacts_linkedin_url
+    ON contacts(linkedin_url)
+    WHERE linkedin_url IS NOT NULL;
+
 -- -----------------------------------------------------------------------------
 -- Append-only event log. Never UPDATE, never DELETE. (D3)
 -- Source of truth; status columns on `contacts` are caches reconstructable
