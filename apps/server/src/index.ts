@@ -21,7 +21,14 @@ import { discoveryRegistry } from './services/providerRegistry.js';
 // Register adapters once at module load. Keeping this at module scope (not
 // inside createApp) means a single registration applies across tests + prod,
 // and tests can clear or override by re-importing the registry module.
-discoveryRegistry.register(new SerpApiXRaySource(config.SERPAPI_API_KEY));
+// India-only discovery per Happy Agent's "Indian employees only" constraint.
+// A Dubai-HQ company hiring in India should still yield only its India-based
+// employees — they're the ones with authority over Indian hires. Hardcoded for
+// v1 since this is a personal tool for the Indian job market; make configurable
+// per-job via location_hint when the need arises (see design.md § 10 open items).
+discoveryRegistry.register(
+  new SerpApiXRaySource(config.SERPAPI_API_KEY, { restrictToCountry: 'IN' }),
+);
 
 export function createApp(): express.Express {
   const app = express();

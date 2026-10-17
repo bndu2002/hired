@@ -23,6 +23,7 @@ import {
   extractRoleFromSnippet,
   extractRoleFromTitle,
   extractTenureHint,
+  isIndianLocationSignal,
 } from '../SerpApiXRaySource.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -149,6 +150,63 @@ describe('buildXRayQuery', () => {
       'site:linkedin.com/in "Appscrip" ("recruiter" OR "engineering manager")',
     );
   });
+
+  it('does NOT include "India" when restrictToCountry is undefined', () => {
+    const q = buildXRayQuery('Appscrip', ['recruiter']);
+    expect(q).not.toContain('"India"');
+  });
+
+  it('includes "India" when restrictToCountry is "IN"', () => {
+    const q = buildXRayQuery('Appscrip', ['recruiter'], 'IN');
+    expect(q).toContain('"India"');
+    expect(q).toBe(
+      'site:linkedin.com/in "Appscrip" "India" ("recruiter")',
+    );
+  });
+});
+
+describe('isIndianLocationSignal', () => {
+  const noUrl = 'https://www.linkedin.com/in/anyone';
+
+  it('matches "Bengaluru"', () => {
+    expect(isIndianLocationSignal('Software Engineer in Bengaluru · 5 years', noUrl)).toBe(true);
+  });
+
+  it('matches "Mumbai"', () => {
+    expect(isIndianLocationSignal('Lead at TCS Mumbai', noUrl)).toBe(true);
+  });
+
+  it('matches "Hyderabad"', () => {
+    expect(isIndianLocationSignal('Based in Hyderabad', noUrl)).toBe(true);
+  });
+
+  it('matches the word "India" directly', () => {
+    expect(isIndianLocationSignal('Engineering Manager · India', noUrl)).toBe(true);
+  });
+
+  it('matches on in.linkedin.com URL subdomain even without snippet signal', () => {
+    expect(isIndianLocationSignal('', 'https://in.linkedin.com/in/anyone')).toBe(true);
+  });
+
+  it('does NOT match "Indianapolis" (whole-word check)', () => {
+    expect(isIndianLocationSignal('Software Engineer in Indianapolis', noUrl)).toBe(false);
+  });
+
+  it('does NOT match generic US snippet', () => {
+    expect(isIndianLocationSignal('Engineering Lead · 3 years · San Francisco Bay Area', noUrl)).toBe(false);
+  });
+
+  it('does NOT match on www.linkedin.com without snippet signal', () => {
+    expect(isIndianLocationSignal('Just a generic role at TestCo', 'https://www.linkedin.com/in/anyone')).toBe(false);
+  });
+
+  it('matches Delhi/NCR/Gurgaon variants', () => {
+    expect(isIndianLocationSignal('Lead · Delhi', noUrl)).toBe(true);
+    expect(isIndianLocationSignal('NCR region', noUrl)).toBe(true);
+    expect(isIndianLocationSignal('Based in Gurgaon', noUrl)).toBe(true);
+    expect(isIndianLocationSignal('Working in Gurugram', noUrl)).toBe(true);
+    expect(isIndianLocationSignal('Noida office', noUrl)).toBe(true);
+  });
 });
 
 // ─── end-to-end adapter via fetch spy ────────────────────────────────────────
@@ -273,5 +331,104 @@ describe('SerpApiXRaySource.estimateCreditsRemaining', () => {
 describe('SerpApiXRaySource constructor', () => {
   it('throws if apiKey is empty', () => {
     expect(() => new SerpApiXRaySource('')).toThrow(/apiKey/);
+  });
+});
+
+// ─── restrictToCountry: 'IN' behavior ────────────────────────────────────────
+
+describe('SerpApiXRaySource with restrictToCountry="IN"', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('includes "India" in the query string', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mockResponse({ organic_results: [] }),
+    );
+
+    const source = new SerpApiXRaySource('fake-key', { restrictToCountry: 'IN' });
+    await source.discover({ companyName: 'Appscrip', jobTitle: 'x', limit: 4 });
+
+    const calledUrl = String(spy.mock.calls[0]?.[0]);
+    expect(decodeURIComponent(calledUrl)).toContain('"India"');
+  });
+
+  it('sets gl=in on the SerpAPI request', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mockResponse({ organic_results: [] }),
+    );
+
+    const source = new SerpApiXRaySource('fake-key', { restrictToCountry: 'IN' });
+    await source.discover({ companyName: 'X', jobTitle: 'y', limit: 4 });
+
+    const calledUrl = String(spy.mock.calls[0]?.[0]);
+    expect(calledUrl).toContain('gl=in');
+  });
+
+  it('does NOT set gl when restrictToCountry is omitted', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      mockResponse({ organic_results: [] }),
+    );
+
+    const source = new SerpApiXRaySource('fake-key'); // default: no restriction
+    await source.discover({ companyName: 'X', jobTitle: 'y', limit: 4 });
+
+    const calledUrl = String(spy.mock.calls[0]?.[0]);
+    expect(calledUrl).not.toContain('gl=in');
+  });
+
+  it('post-filters out contacts without India signal', async () => {
+    // 3 results: 2 Indian (by URL + by snippet), 1 US (no signal)
+    const mixed = {
+      organic_results: [
+        {
+          title: 'Arjun Mehta - Staff SWE - Appscrip | LinkedIn',
+          link: 'https://in.linkedin.com/in/arjun-mehta',
+          snippet: 'Staff Software Engineer at Appscrip',
+        },
+        {
+          title: 'Priya Sharma - Engineering Lead - Appscrip | LinkedIn',
+          link: 'https://www.linkedin.com/in/priya-sharma',
+          snippet: 'Engineering Lead · Bengaluru · 2 years',
+        },
+        {
+          title: 'Charlie White - Recruiter - Appscrip | LinkedIn',
+          link: 'https://www.linkedin.com/in/charlie-white',
+          snippet: 'Senior Recruiter · San Francisco Bay Area · 3 years',
+        },
+      ],
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockResponse(mixed));
+
+    const source = new SerpApiXRaySource('fake-key', { restrictToCountry: 'IN' });
+    const results = await source.discover({
+      companyName: 'Appscrip',
+      jobTitle: 'x',
+      limit: 10,
+    });
+
+    const names = results.map((r) => r.name);
+    expect(names).toContain('Arjun Mehta');
+    expect(names).toContain('Priya Sharma');
+    expect(names).not.toContain('Charlie White'); // US-based, filtered
+    expect(results).toHaveLength(2);
+  });
+
+  it('keeps non-Indian contacts when restrictToCountry is omitted', async () => {
+    const mixed = {
+      organic_results: [
+        {
+          title: 'Charlie White - Recruiter - X | LinkedIn',
+          link: 'https://www.linkedin.com/in/charlie-white',
+          snippet: 'Senior Recruiter · San Francisco · 3 years',
+        },
+      ],
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockResponse(mixed));
+
+    const source = new SerpApiXRaySource('fake-key'); // default
+    const results = await source.discover({ companyName: 'X', jobTitle: 'y', limit: 4 });
+
+    expect(results.map((r) => r.name)).toContain('Charlie White');
   });
 });

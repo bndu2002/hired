@@ -47,6 +47,71 @@ const DEFAULT_ROLES = [
   'senior engineer',
 ];
 
+/** ISO 3166-1 alpha-2 country codes we know how to restrict to. */
+export type RestrictCountry = 'IN';
+
+export interface SerpApiXRayOptions {
+  /**
+   * Restrict discovery to one country's employees only. Match Happy Agent's
+   * "Indian employees only" behavior for the Indian job market: a company
+   * HQ'd elsewhere but hiring in India should still only yield India-based
+   * contacts, because they're the ones with authority over Indian hires.
+   *
+   * When set, three layers of filtering apply:
+   *   1. Query gets " 'India' " as a required term
+   *   2. SerpAPI `gl=in` biases ranking toward Indian results
+   *   3. Response is post-filtered against known India signals (see
+   *      isIndianLocationSignal below)
+   */
+  readonly restrictToCountry?: RestrictCountry | undefined;
+}
+
+// ─── India-signal detection (pure, exported for direct tests) ────────────────
+
+const INDIA_WORD = /\bindia\b/i;
+
+const INDIAN_CITY_PATTERNS: readonly RegExp[] = [
+  /\bbengaluru\b/i,
+  /\bbangalore\b/i,
+  /\bhyderabad\b/i,
+  /\bmumbai\b/i,
+  /\bdelhi\b/i,
+  /\bncr\b/i,
+  /\bnoida\b/i,
+  /\bgurgaon\b/i,
+  /\bgurugram\b/i,
+  /\bpune\b/i,
+  /\bchennai\b/i,
+  /\bkolkata\b/i,
+  /\bahmedabad\b/i,
+  /\bjaipur\b/i,
+  /\bchandigarh\b/i,
+  /\bkochi\b/i,
+  /\bcochin\b/i,
+  /\btrivandrum\b/i,
+  /\bthiruvananthapuram\b/i,
+  /\bmysore\b/i,
+  /\bmysuru\b/i,
+  /\bindore\b/i,
+];
+
+/**
+ * Decide whether a SerpAPI organic result is India-based.
+ *
+ * Signals (any one is enough):
+ *   - URL subdomain is `in.linkedin.com` (strongest; LinkedIn's regional domain)
+ *   - Snippet contains the word "India" (whole-word match, no "Indianapolis")
+ *   - Snippet mentions a known Indian city
+ */
+export function isIndianLocationSignal(
+  snippet: string,
+  linkedinUrl: string,
+): boolean {
+  if (linkedinUrl.includes('in.linkedin.com')) return true;
+  if (INDIA_WORD.test(snippet)) return true;
+  return INDIAN_CITY_PATTERNS.some((pattern) => pattern.test(snippet));
+}
+
 // ─── response schema (Zod) ───────────────────────────────────────────────────
 
 /**
@@ -152,9 +217,14 @@ export function canonicalizeLinkedInUrl(url: string): string {
 export function buildXRayQuery(
   companyName: string,
   roles: readonly string[] = DEFAULT_ROLES,
+  restrictToCountry?: RestrictCountry | undefined,
 ): string {
   const rolesClause = roles.map((r) => `"${r}"`).join(' OR ');
-  return `site:linkedin.com/in "${companyName}" (${rolesClause})`;
+  // When restricted to India, we require "India" to appear somewhere on the
+  // indexed LinkedIn page. Google indexes profile headlines, locations,
+  // and about sections — so this catches location-tagged profiles directly.
+  const countryClause = restrictToCountry === 'IN' ? ' "India"' : '';
+  return `site:linkedin.com/in "${companyName}"${countryClause} (${rolesClause})`;
 }
 
 // ─── the adapter ─────────────────────────────────────────────────────────────
@@ -163,17 +233,25 @@ export class SerpApiXRaySource implements DiscoverySource {
   readonly name = 'serpapi_xray';
   readonly kind = 'discovery' as const;
 
-  constructor(private readonly apiKey: string) {
+  constructor(
+    private readonly apiKey: string,
+    private readonly options: SerpApiXRayOptions = {},
+  ) {
     if (!apiKey) throw new Error('SerpApiXRaySource: apiKey required');
   }
 
   async discover(input: DiscoveryInput): Promise<CandidateContact[]> {
-    const q = buildXRayQuery(input.companyName);
+    const restrict = this.options.restrictToCountry;
+    const q = buildXRayQuery(input.companyName, undefined, restrict);
     const url = new URL(SERPAPI_SEARCH_URL);
     url.searchParams.set('engine', 'google');
     url.searchParams.set('q', q);
-    url.searchParams.set('num', String(Math.min(input.limit * 2, 20))); // overfetch slightly to allow filtering
+    // Overfetch to leave room for both dedup and country filtering.
+    url.searchParams.set('num', String(Math.min(input.limit * 3, 30)));
     url.searchParams.set('hl', 'en');
+    if (restrict === 'IN') {
+      url.searchParams.set('gl', 'in');
+    }
     url.searchParams.set('api_key', this.apiKey);
 
     const response = await fetch(url.toString());
@@ -190,6 +268,11 @@ export class SerpApiXRaySource implements DiscoverySource {
     const results = parsed.organic_results ?? [];
     const candidates = results
       .filter((r) => r.link.includes('linkedin.com/in/'))
+      .filter((r) => {
+        // Country post-filter: only applies when restrictToCountry is set.
+        if (restrict !== 'IN') return true;
+        return isIndianLocationSignal(r.snippet ?? '', r.link);
+      })
       .map((r) => this.parseResult(r))
       .filter((c): c is CandidateContact => c !== null);
 
