@@ -1,0 +1,53 @@
+{
+  "search_metadata": {
+    "id": "test-id",
+    "status": "Success"
+  },
+  "search_parameters": {
+    "engine": "google",
+    "q": "site:linkedin.com/in \"Appscrip\" (\"recruiter\" OR \"engineering manager\")"
+  },
+  "search_information": {
+    "query_displayed": "site:linkedin.com/in \"Appscrip\" (\"recruiter\" OR \"engineering manager\")",
+    "total_results": 42
+  },
+  "organic_results": [
+    {
+      "position": 1,
+      "title": "Arjun Mehta - Staff Software Engineer - Appscrip | LinkedIn",
+      "link": "https://in.linkedin.com/in/arjun-mehta-dev?trk=public_profile",
+      "snippet": "Arjun Mehta · Staff Software Engineer at Appscrip · 2 years · Bengaluru, India · Backend infrastructure, payments..."
+    },
+    {
+      "position": 2,
+      "title": "Priya Sharma - Engineering Lead - Appscrip | LinkedIn",
+      "link": "https://www.linkedin.com/in/priya-sharma-eng/",
+      "snippet": "Priya Sharma. Engineering Lead at Appscrip. 1 year 6 months. Leading a team of 8 engineers..."
+    },
+    {
+      "position": 3,
+      "title": "Dr. Trupti Patil | LinkedIn",
+      "link": "https://www.linkedin.com/in/trupti-patil-ai",
+      "snippet": "AI Automation Consultant · 10+ years · Working with Appscrip and other product teams on ML..."
+    },
+    {
+      "position": 4,
+      "title": "Appscrip Careers | LinkedIn",
+      "link": "https://www.linkedin.com/company/appscrip/jobs",
+      "snippet": "Appscrip is hiring! Explore careers..."
+    },
+    {
+      "position": 5,
+      "title": "Rahul Kumar - Senior Recruiter - Appscrip | LinkedIn",
+      "link": "https://www.linkedin.com/in/rahul-kumar-xyz",
+      "snippet": "Rahul Kumar · Senior Recruiter at Appscrip · 8 months · Hyderabad..."
+    },
+    {
+      "position": 6,
+      "title": "Arjun Mehta - Staff Software Engineer - Appscrip | LinkedIn",
+      "link": "https://in.linkedin.com/in/arjun-mehta-dev/",
+      "snippet": "Arjun Mehta · Staff Software Engineer at Appscrip · 2 years · Duplicate result for dedup test"
+    }
+  ],
+  "credits_used": 1
+}
