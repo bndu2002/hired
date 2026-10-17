@@ -1,0 +1,21 @@
+{
+  "name": "extension",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Hired Chrome extension — scrapes Happy Agent jobs and assists LinkedIn actions.",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"(no tests in extension yet)\" && exit 0"
+  },
+  "dependencies": {
+    "@hired/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.33",
+    "@types/chrome": "^0.0.287",
+    "vite": "^5.4.11"
+  }
+}

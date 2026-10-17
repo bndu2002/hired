@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Hired",
+  "version": "0.0.1",
+  "description": "Personal referral outreach agent — invoke on Happy Agent via Alt+H.",
+  "action": {
+    "default_title": "Hired · settings",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://platform.uplers.com/*"],
+      "js": ["src/content/uplers.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "scripting", "activeTab"],
+  "host_permissions": [
+    "https://platform.uplers.com/*",
+    "http://127.0.0.1:4000/*"
+  ],
+  "commands": {
+    "run-via-hired": {
+      "suggested_key": {
+        "default": "Alt+H",
+        "windows": "Alt+H",
+        "linux": "Alt+H",
+        "mac": "Alt+H"
+      },
+      "description": "Capture the current Happy Agent job detail and open it in Hired"
+    }
+  }
+}
