@@ -32,7 +32,7 @@ Checkbox discipline: tick a task only when its tests pass locally. "Done" phase 
 - [ ] **Google Cloud Console**: create project `hired-agent-local`, enable Gmail API, create OAuth 2.0 Client (Desktop app type initially — faster than Web for dev). Record `client_id`, `client_secret`.
 - [ ] **Gemini API key**: `aistudio.google.com` → Get API Key (free tier)
 - [ ] **SerpAPI**: signup at `serpapi.com` → Dashboard → copy API key (250 searches/mo free, **no card required**)
-- [ ] **Hunter.io**: signup → `hunter.io/api` → copy API key (50 credits/mo free)
+- [ ] **Snov.io**: signup at `app.snov.io` → Account → API tab → copy **User ID** and **API Secret** (OAuth2 client credentials, not a single key). 50 credits/mo free. Hunter was the original plan but requires a business email; Snov accepts gmail.
 - [ ] **Reoon**: signup at `emailverifier.reoon.com` → Dashboard → API key (600 verifications/mo free)
 
 **Phase 0 done when:** all five API keys are in a scratch file you'll paste into `.env` in Phase 1.
@@ -188,7 +188,7 @@ Historical reference for what was planned:
 
 ## Phase 3 — Discovery + email path (Day 2 afternoon / Day 3, ~6-8 hours)
 
-**Goal:** Click Run Agent → modal opens → discovers contacts via SerpAPI X-ray → finds emails via Hunter → verifies via Reoon → user sees modal with signals.
+**Goal:** Click Run Agent → modal opens → discovers contacts via SerpAPI X-ray → finds emails via Snov (with `PatternHeuristicFinder` fallback through Reoon) → verifies via Reoon → user sees modal with signals.
 
 ### 3.1 Core domain modules
 
@@ -224,16 +224,37 @@ Historical reference for what was planned:
 - Unit with `nock`: mock SerpAPI response → asserts parsing extracts right fields
 - Edge cases: results missing snippet, non-English profiles, URLs with query params, 401 (bad API key), 429 (quota exceeded)
 
-### 3.4 Email finder: Hunter adapter
+### 3.4 Email finder: Snov adapter (primary) + PatternHeuristicFinder (fallback)
 
+#### 3.4a Snov adapter
+
+- [ ] Add `SNOV_CLIENT_ID` and `SNOV_CLIENT_SECRET` to `config/index.ts` Zod schema (both optional with empty-string preprocessing, like Hunter was)
 - [ ] `apps/server/src/adapters/emailFinder/EmailFinder.ts` — re-export interface
-- [ ] `apps/server/src/adapters/emailFinder/HunterFinder.ts` — calls Hunter's `/email-finder` endpoint with first_name + last_name + domain; returns `EmailFindResult | null`
-- [ ] Confidence: Hunter returns a `score` 0-100; map to `high` (≥ 90), `medium` (≥ 60), `low` (< 60)
-- [ ] Register in registry
+- [ ] `apps/server/src/adapters/emailFinder/SnovFinder.ts` — OAuth2 client-credentials flow:
+  - Exchange `client_id` + `client_secret` for a bearer token at `https://api.snov.io/v1/oauth/access_token`. Cache the token for its TTL.
+  - Call `POST https://api.snov.io/v1/get-emails-by-domain` (or the current find-by-name endpoint — verify in Snov docs when building) with first_name + last_name + domain
+  - Parse response → `EmailFindResult | null` with confidence mapped from Snov's status (`valid` → `high`, `catchall` → `medium`, else `low`)
+  - `estimateCreditsRemaining()` hits Snov's balance endpoint; mirror to `provider_credits` table
+- [ ] Register in registry (will be skipped automatically when credentials are missing)
 
 **Tests:**
-- Unit with nock: successful find, 404 not found, rate-limit (429)
-- Credit telemetry increments on each call
+- Unit with nock: successful find, 404 not found, 401 (bad credentials refresh), 429 rate-limit
+- Credit telemetry increments per find call
+
+#### 3.4b PatternHeuristicFinder (fallback, no external API)
+
+- [ ] `apps/server/src/adapters/emailFinder/PatternHeuristicFinder.ts` — no signup needed, uses the existing Reoon verifier:
+  - Generate patterns from first + last + companyDomain: `first.last@`, `first@`, `flast@`, `firstlast@`, `first_last@` (short-circuit on first `valid` from verifier)
+  - **Bonus hybrid**: before trying patterns, scan the SerpAPI snippet text (if available for this contact) for a `/[\w.-]+@[\w-]+\.[\w.-]+/` match — many LinkedIn profiles / team pages that Google indexes include the real email directly. Verify it; if `valid`, return with `confidence: 'high'`.
+  - Returns `EmailFindResult | null`
+  - `estimateCreditsRemaining()` returns `null` (unlimited at this layer; the real cost is Reoon verifier credits consumed inside)
+- [ ] Register in registry *after* Snov so the fallback chain tries Snov first
+
+**Tests:**
+- Unit: pattern generation produces expected ordered list for various name shapes (single-name, hyphenated, non-ASCII)
+- Unit: snippet-regex extracts email, rejects obvious noise (`example@example.com`, `noreply@`)
+- Unit with mocked verifier: short-circuits on first valid, returns null when all patterns `invalid`
+- Integration: full fallback chain — Snov exhausted → PatternHeuristicFinder picks up
 
 ### 3.5 Email verifier: Reoon adapter
 
@@ -530,7 +551,7 @@ Not blocking the 6-day interview target. Order these by whatever's biting hardes
 
 - [ ] **Follow-up CRON**: 3-business-day threaded nudges on silent Gmail threads. Uses `date-fns-business-days`. Logs `followup_sent` events.
 - [ ] **Second DiscoverySource adapter**: `ServlyXRaySource` (2,500 one-time credits) or `ScrapflyXRaySource` (1,000 one-time credits, no card) as fallback when SerpAPI's monthly 250 depletes
-- [ ] **Second EmailFinder adapter**: `SnovFinder` or `ProspeoFinder` (Apollo explicitly excluded per owner decision)
+- [ ] **Additional EmailFinder adapter**: `ProspeoFinder` or another (Snov is already day-1 per Phase 3.4a; Apollo is explicitly excluded per owner decision)
 - [ ] **Second EmailVerifier adapter**: `ZeroBounceVerifier` as spill-over to Reoon
 - [ ] **Reminder Alerts tab**: show overdue follow-ups and un-replied inbound messages
 - [ ] **Resume tailoring**: AI-rewrite CV per job (Gemini call site)

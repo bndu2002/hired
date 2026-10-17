@@ -41,7 +41,7 @@ Written in first person because v1 has one user.
 
 - I click **Run Agent** on a job card. A modal opens.
 - The modal first shows channel checkboxes (Gmail, LinkedIn). I pick one or both.
-- The modal then runs discovery (SerpAPI X-ray) and email finding (Hunter) and email verification (Reoon) in the background and populates with up to 8 discovered contacts.
+- The modal then runs discovery (SerpAPI X-ray) and email finding (Snov) and email verification (Reoon) in the background and populates with up to 8 discovered contacts.
 - For each contact the modal shows: name, title, tenure signal (if available), email with verification state, LinkedIn URL. Each contact has two channel pills (`[Gmail] [LinkedIn]`) that I can toggle individually.
 - Contacts default to selected if they look clean (verified email, matching role). Unverified / likely-ex-employee / role-mismatch contacts default to unchecked.
 - I review, uncheck anyone who looks wrong, click **Send to N contacts**.
@@ -84,7 +84,7 @@ A full day of me using the tool should look like: open dashboard (0.5 min) → p
 - **On-demand** job capture from Happy Agent via Chrome extension — one job at a time, triggered by `Alt+H` hotkey on the focused job detail
 - Chrome extension with **stealth model**: zero DOM injection on Happy, closed-Shadow-DOM toast feedback, one-time shared-secret entry via popup, background service worker as fetch proxy
 - Discovery (`DiscoverySource` pluggable interface, SerpAPI X-ray as the day-1 adapter)
-- Email finder (`EmailFinder` pluggable interface, Hunter as the day-1 adapter)
+- Email finder (`EmailFinder` pluggable interface, Snov as the day-1 adapter, `PatternHeuristicFinder` as the fallback)
 - Email verifier (`EmailVerifier` pluggable interface, Reoon as the day-1 adapter)
 - Gmail OAuth2, outbound send with thread tracking, inbound 15-min poll
 - Gemini for template variable substitution and reply intent classification
@@ -127,7 +127,7 @@ A full day of me using the tool should look like: open dashboard (0.5 min) → p
 - **D3 (Append-only events).** No `UPDATE` or `DELETE` on the `events` table, ever. Status columns on `contacts` are caches, recomputable from `events`.
 - **D6 (Daily cap).** 4 jobs/day enforced server-side; the 5th call to `/api/agent/run` returns a graceful 429-equivalent with a "resumes tomorrow" message. Contacts-per-job ceiling is 8, user-selectable down to 1.
 - **Zero cost.** All third-party integrations on free tiers at the time of integration; graceful quota-exhaustion handling with alerts in the dashboard.
-- **Local only.** The server binds to `127.0.0.1`. Shared-secret header required for extension → server calls. No outbound connections except to Gmail, Gemini, SerpAPI, Hunter, Reoon.
+- **Local only.** The server binds to `127.0.0.1`. Shared-secret header required for extension → server calls. No outbound connections except to Gmail, Gemini, SerpAPI, Snov, Reoon.
 - **No PII in logs.** Logs reference contacts by internal ID, not name/email. The event payload may store identifying data because it's part of the data model.
 
 ## 7. Acceptance criteria for v1 completion
