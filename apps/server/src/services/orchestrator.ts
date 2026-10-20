@@ -22,9 +22,25 @@ import { discoveryRegistry } from './providerRegistry.js';
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
+import type { PreviousContact } from '@hired/types';
+
 export interface DiscoverInput {
   jobId: number;
   channels: RunChannels;
+}
+
+/**
+ * One newly-discovered contact plus (optionally) a snapshot of the last time
+ * we actually reached out to the same person — matched by linkedin_url.
+ *
+ * The modal uses `previouslyContacted` to default-uncheck candidates we've
+ * already contacted and surface context ("Already contacted on Oct 10 · No
+ * reply yet"). Cross-run dedup is soft (user can tick back on if a different
+ * context justifies a second touch); see .kiro/specs/hired/design.md.
+ */
+export interface DiscoveredContactView {
+  contact: contactRepo.Contact;
+  previouslyContacted: PreviousContact | null;
 }
 
 /**
@@ -36,7 +52,7 @@ export type DiscoverResult =
   | {
       status: 'ok';
       runId: number;
-      contacts: contactRepo.Contact[];
+      contacts: DiscoveredContactView[];
       discoveredVia: string;
     }
   | {
@@ -115,7 +131,17 @@ export async function runDiscoverPhase(
     return { status: 'no_discovery', runId: run.id, reason: 'empty_results' };
   }
 
-  // 5. Insert the contact rows in bulk.
+  // 5. Cross-run dedup lookup. Done BEFORE insert so we're asking: "which
+  //    of these candidates have we actually reached out to in a prior run?"
+  //    The repo query filters out PENDING-only rows (discovered-never-sent),
+  //    so just-discovered-again counts as fresh.
+  const candidateUrls = discovery.result
+    .map((c) => c.linkedinUrl)
+    .filter((url): url is string => Boolean(url));
+  const previouslyContactedByUrl =
+    await contactRepo.findPreviousByLinkedinUrls(candidateUrls);
+
+  // 6. Insert the contact rows in bulk.
   const contacts = await contactRepo.createMany(
     run.id,
     discovery.result.slice(0, MAX_CONTACTS_PER_RUN).map((c) => {
@@ -130,7 +156,7 @@ export async function runDiscoverPhase(
     }),
   );
 
-  // 6. Append `contact_discovered` events — one per contact. D3 append-only.
+  // 7. Append `contact_discovered` events — one per contact. D3 append-only.
   await Promise.all(
     contacts.map((contact) =>
       eventRepo.append(
@@ -140,19 +166,36 @@ export async function runDiscoverPhase(
     ),
   );
 
-  // 7. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
+  // 8. Build the enriched view attaching previous-contact info to each.
+  const contactViews: DiscoveredContactView[] = contacts.map((contact) => ({
+    contact,
+    previouslyContacted:
+      (contact.linkedinUrl &&
+        previouslyContactedByUrl.get(contact.linkedinUrl)) ||
+      null,
+  }));
+
+  // 9. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
   //    adds a DISPATCH_PENDING state between discovery and send.)
   await runRepo.updateStatus(run.id, 'COMPLETED');
 
+  const previouslyContactedCount = contactViews.filter(
+    (v) => v.previouslyContacted !== null,
+  ).length;
   logger.info(
-    { runId: run.id, contactCount: contacts.length, via: discovery.via },
+    {
+      runId: run.id,
+      contactCount: contacts.length,
+      previouslyContactedCount,
+      via: discovery.via,
+    },
     'discovery phase completed',
   );
 
   return {
     status: 'ok',
     runId: run.id,
-    contacts,
+    contacts: contactViews,
     discoveredVia: discovery.via,
   };
 }

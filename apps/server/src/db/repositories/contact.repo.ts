@@ -8,7 +8,7 @@
  * See .kiro/specs/hired/design.md § 5-6.
  */
 
-import type { GmailStatus, LinkedinStatus } from '@hired/types';
+import type { GmailStatus, LinkedinStatus, PreviousContact } from '@hired/types';
 import { pool } from '../client.js';
 
 export interface Contact {
@@ -124,4 +124,56 @@ export async function listByRun(runId: number): Promise<Contact[]> {
     [runId],
   );
   return result.rows.map(rowToContact);
+}
+
+// ─── cross-run dedup lookup (soft dedup / Option A) ──────────────────────────
+
+/**
+ * For each LinkedIn URL in the input, find the most recent prior contact row
+ * where any outreach actually happened (gmail_status != 'PENDING' OR
+ * linkedin_status != 'PENDING'). Rows where we discovered the person but
+ * never dispatched anything are NOT counted as "previously contacted" — the
+ * person was just surfaced, not reached.
+ *
+ * Uses Postgres DISTINCT ON for per-URL latest row in a single query.
+ * Returns a Map so callers do O(1) lookups per candidate.
+ */
+export async function findPreviousByLinkedinUrls(
+  linkedinUrls: readonly string[],
+): Promise<Map<string, PreviousContact>> {
+  const result = new Map<string, PreviousContact>();
+  if (linkedinUrls.length === 0) return result;
+
+  const rows = await pool.query<{
+    linkedin_url: string;
+    run_id: number;
+    gmail_status: string;
+    linkedin_status: string;
+    last_activity: Date;
+  }>(
+    `
+    SELECT DISTINCT ON (linkedin_url)
+      linkedin_url,
+      run_id,
+      gmail_status,
+      linkedin_status,
+      last_activity
+    FROM contacts
+    WHERE linkedin_url = ANY($1::text[])
+      AND (gmail_status != 'PENDING' OR linkedin_status != 'PENDING')
+    ORDER BY linkedin_url, last_activity DESC, id DESC
+    `,
+    [linkedinUrls as string[]],
+  );
+
+  for (const row of rows.rows) {
+    result.set(row.linkedin_url, {
+      lastOutreachAt: row.last_activity.toISOString(),
+      lastRunId: row.run_id,
+      lastGmailStatus: row.gmail_status as GmailStatus,
+      lastLinkedinStatus: row.linkedin_status as LinkedinStatus,
+    });
+  }
+
+  return result;
 }

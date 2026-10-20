@@ -27,3 +27,23 @@ export type LinkedinStatus =
   | 'DECLINED';
 
 export type Sentiment = 'POSITIVE' | 'NEGATIVE';
+
+/**
+ * Snapshot of the most recent prior outreach to a given person
+ * (keyed by `linkedin_url`). Used by the Run Agent modal to default-uncheck
+ * candidates we've already contacted and surface the context.
+ *
+ * Null in the API response means "we've never actually sent anything to this
+ * person before" — either they're genuinely new, or earlier runs discovered
+ * them but we never dispatched outreach.
+ *
+ * See .kiro/specs/hired/design.md — cross-run dedup (Option A, soft via UI).
+ */
+export interface PreviousContact {
+  /** ISO timestamp of the previous contact's last activity. */
+  lastOutreachAt: string;
+  /** The run that produced the previous contact row. */
+  lastRunId: number;
+  lastGmailStatus: GmailStatus;
+  lastLinkedinStatus: LinkedinStatus;
+}
