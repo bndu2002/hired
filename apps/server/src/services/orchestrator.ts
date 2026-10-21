@@ -20,9 +20,13 @@ import type { RunChannels } from '../db/repositories/run.repo.js';
 import { logger } from '../logger.js';
 import { discoveryRegistry } from './providerRegistry.js';
 
-// ─── types ───────────────────────────────────────────────────────────────────
+import type { Job, PreviousContact } from '@hired/types';
+import { companyNameToDomain } from '../core/companyDomain.js';
+import { splitName } from '../core/nameSplit.js';
+import type { Contact } from '../db/repositories/contact.repo.js';
+import { emailFinderRegistry } from './providerRegistry.js';
 
-import type { PreviousContact } from '@hired/types';
+// ─── types ───────────────────────────────────────────────────────────────────
 
 export interface DiscoverInput {
   jobId: number;
@@ -166,8 +170,26 @@ export async function runDiscoverPhase(
     ),
   );
 
-  // 8. Build the enriched view attaching previous-contact info to each.
-  const contactViews: DiscoveredContactView[] = contacts.map((contact) => ({
+  // 8. Email resolution — only when the user asked for gmail (saves credits).
+  //    Runs the finder registry per contact. D2 is enforced inside the finders
+  //    themselves (Snov's internal verification OR PatternHeuristicFinder's
+  //    use of our verifier), so the orchestrator trusts their verdict.
+  const emailEligible =
+    input.channels === 'gmail' || input.channels === 'both';
+  if (emailEligible) {
+    await Promise.all(
+      contacts.map((contact) => resolveEmailForContact(contact, job)),
+    );
+  }
+
+  // 9. Re-fetch contacts after email resolution so the returned view reflects
+  //    whatever updates landed. Cheap (one query); keeps the data path linear.
+  const resolvedContacts = emailEligible
+    ? await contactRepo.listByRun(run.id)
+    : contacts;
+
+  // 10. Build the enriched view attaching previous-contact info to each.
+  const contactViews: DiscoveredContactView[] = resolvedContacts.map((contact) => ({
     contact,
     previouslyContacted:
       (contact.linkedinUrl &&
@@ -175,18 +197,22 @@ export async function runDiscoverPhase(
       null,
   }));
 
-  // 9. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
-  //    adds a DISPATCH_PENDING state between discovery and send.)
+  // 11. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
+  //     adds a DISPATCH_PENDING state between discovery and send.)
   await runRepo.updateStatus(run.id, 'COMPLETED');
 
   const previouslyContactedCount = contactViews.filter(
     (v) => v.previouslyContacted !== null,
+  ).length;
+  const resolvedEmailCount = contactViews.filter(
+    (v) => v.contact.email !== null && v.contact.emailVerified,
   ).length;
   logger.info(
     {
       runId: run.id,
       contactCount: contacts.length,
       previouslyContactedCount,
+      resolvedEmailCount,
       via: discovery.via,
     },
     'discovery phase completed',
@@ -198,4 +224,116 @@ export async function runDiscoverPhase(
     contacts: contactViews,
     discoveredVia: discovery.via,
   };
+}
+
+// ─── email resolution per contact ────────────────────────────────────────────
+
+/**
+ * Try to find + record an email address for one contact.
+ *
+ * Pipeline:
+ *   1. Split name into first/last. Skip if we can't get a lastName (finders
+ *      can't work with single-name people — those fall back to LinkedIn-only).
+ *   2. Derive the company's email domain heuristically from job.companyName.
+ *   3. emailFinderRegistry.resolve() — iterates finders in order; first
+ *      non-null wins. SnovFinder (if registered) is primary;
+ *      PatternHeuristicFinder is the always-registered fallback.
+ *   4. Log events (email_find_attempted, email_found | email_not_found) and
+ *      the verification outcome (email_verified | email_unverifiable).
+ *   5. UPDATE the contact row with the resolved email + flags.
+ *
+ * Error handling: adapter failures are expected; the registry logs them and
+ * returns null. Everything that gets to this function is non-fatal — we never
+ * fail the whole run because of one contact's email resolution.
+ */
+async function resolveEmailForContact(
+  contact: Contact,
+  job: Job,
+): Promise<void> {
+  const { firstName, lastName } = splitName(contact.name);
+  if (!firstName || !lastName) {
+    // Finders need both names; skip without logging an event (nothing to log).
+    return;
+  }
+
+  let companyDomain: string;
+  try {
+    companyDomain = companyNameToDomain(job.companyName);
+  } catch (err) {
+    logger.warn(
+      { contactId: contact.id, companyName: job.companyName, err },
+      'cannot derive company domain, skipping email resolution',
+    );
+    return;
+  }
+
+  const findInput: {
+    firstName: string;
+    lastName: string;
+    companyDomain: string;
+    linkedinUrl?: string;
+  } = { firstName, lastName, companyDomain };
+  if (contact.linkedinUrl) findInput.linkedinUrl = contact.linkedinUrl;
+
+  const resolved = await emailFinderRegistry.resolve((finder) =>
+    finder.find(findInput),
+  );
+
+  await eventRepo.append(
+    contact.id,
+    makeEvent('email_find_attempted', {
+      foundVia: resolved?.via ?? 'none',
+      success: resolved !== null,
+    }),
+  );
+
+  if (!resolved) {
+    await eventRepo.append(
+      contact.id,
+      makeEvent('email_not_found', { reason: 'all finders returned null' }),
+    );
+    return;
+  }
+
+  await eventRepo.append(
+    contact.id,
+    makeEvent('email_found', {
+      email: resolved.result.email,
+      foundVia: resolved.via,
+      confidence: resolved.result.confidence,
+    }),
+  );
+
+  // D2 — the finder either used our verifier (PatternHeuristicFinder) or
+  // its own (Snov). High + medium confidence are both backed by a verifier
+  // saying "this is a real address or at least a reachable domain". Low
+  // confidence means the finder couldn't confirm — treat as unverified.
+  const emailVerified = resolved.result.confidence !== 'low';
+
+  await contactRepo.updateEmailInfo({
+    contactId: contact.id,
+    email: resolved.result.email,
+    emailVerified,
+    emailFoundVia: resolved.via,
+    emailVerifiedVia: emailVerified ? resolved.via : null,
+  });
+
+  if (emailVerified) {
+    await eventRepo.append(
+      contact.id,
+      makeEvent('email_verified', {
+        verifiedVia: resolved.via,
+        status: 'valid',
+      }),
+    );
+  } else {
+    await eventRepo.append(
+      contact.id,
+      makeEvent('email_unverifiable', {
+        verifiedVia: resolved.via,
+        status: 'unknown',
+        reason: `low confidence (${resolved.result.confidence})`,
+      }),
+    );
+  }
 }

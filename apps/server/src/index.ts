@@ -10,25 +10,51 @@
 
 import express from 'express';
 import { SerpApiXRaySource } from './adapters/discovery/SerpApiXRaySource.js';
+import { PatternHeuristicFinder } from './adapters/emailFinder/PatternHeuristicFinder.js';
+import { SnovFinder } from './adapters/emailFinder/SnovFinder.js';
+import { ReoonVerifier } from './adapters/emailVerifier/ReoonVerifier.js';
 import { config } from './config/index.js';
 import { logger } from './logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { sharedSecret } from './middleware/sharedSecret.js';
 import { agentRouter } from './routes/agent.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
-import { discoveryRegistry } from './services/providerRegistry.js';
+import {
+  discoveryRegistry,
+  emailFinderRegistry,
+  emailVerifierRegistry,
+} from './services/providerRegistry.js';
 
 // Register adapters once at module load. Keeping this at module scope (not
 // inside createApp) means a single registration applies across tests + prod,
 // and tests can clear or override by re-importing the registry module.
-// India-only discovery per Happy Agent's "Indian employees only" constraint.
-// A Dubai-HQ company hiring in India should still yield only its India-based
-// employees — they're the ones with authority over Indian hires. Hardcoded for
-// v1 since this is a personal tool for the Indian job market; make configurable
-// per-job via location_hint when the need arises (see design.md § 10 open items).
+
+// ─── Discovery (D9 — India-only via SerpAPI X-ray + gl=in + post-filter) ───
+// Happy Agent's "Indian employees only" constraint. A Dubai-HQ company
+// hiring in India should still yield only its India-based employees — they
+// have authority over Indian hires. Hardcoded 'IN' for v1 personal tool;
+// per-job configurability (from location_hint) is a v2 target.
 discoveryRegistry.register(
   new SerpApiXRaySource(config.SERPAPI_API_KEY, { restrictToCountry: 'IN' }),
 );
+
+// ─── Email verifier (D2 — verified-only sends) ─────────────────────────────
+emailVerifierRegistry.register(new ReoonVerifier(config.REOON_API_KEY));
+
+// ─── Email finders — Snov first (crawled data), Pattern fallback ──────────
+// Snov is optional at config level; skip registration if creds are absent.
+// Pattern finder always registers — it uses the verifier registry to brute
+// patterns, so it's a safety net when Snov quota runs out or isn't configured.
+if (config.SNOV_CLIENT_ID && config.SNOV_CLIENT_SECRET) {
+  emailFinderRegistry.register(
+    new SnovFinder(config.SNOV_CLIENT_ID, config.SNOV_CLIENT_SECRET),
+  );
+} else {
+  logger.warn(
+    'SNOV_CLIENT_ID/SNOV_CLIENT_SECRET missing — SnovFinder not registered; PatternHeuristicFinder covers',
+  );
+}
+emailFinderRegistry.register(new PatternHeuristicFinder(emailVerifierRegistry));
 
 export function createApp(): express.Express {
   const app = express();

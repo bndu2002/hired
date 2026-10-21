@@ -19,6 +19,8 @@ export interface Contact {
   tenureHint: string | null;
   email: string | null;
   emailVerified: boolean;
+  emailFoundVia: string | null;
+  emailVerifiedVia: string | null;
   linkedinUrl: string | null;
   gmailStatus: GmailStatus;
   linkedinStatus: LinkedinStatus;
@@ -34,6 +36,8 @@ interface ContactRow {
   tenure_hint: string | null;
   email: string | null;
   email_verified: boolean;
+  email_found_via: string | null;
+  email_verified_via: string | null;
   linkedin_url: string | null;
   gmail_status: string;
   linkedin_status: string;
@@ -50,6 +54,8 @@ function rowToContact(r: ContactRow): Contact {
     tenureHint: r.tenure_hint,
     email: r.email,
     emailVerified: r.email_verified,
+    emailFoundVia: r.email_found_via,
+    emailVerifiedVia: r.email_verified_via,
     linkedinUrl: r.linkedin_url,
     gmailStatus: r.gmail_status as GmailStatus,
     linkedinStatus: r.linkedin_status as LinkedinStatus,
@@ -124,6 +130,45 @@ export async function listByRun(runId: number): Promise<Contact[]> {
     [runId],
   );
   return result.rows.map(rowToContact);
+}
+
+// ─── email resolution update ─────────────────────────────────────────────────
+
+export interface UpdateEmailInfoInput {
+  contactId: number;
+  email: string | null;
+  emailVerified: boolean;
+  emailFoundVia: string | null;
+  emailVerifiedVia: string | null;
+}
+
+/**
+ * Persist the resolved email + verification result for a single contact.
+ * Called by the orchestrator after the email-finder/verifier chain runs.
+ *
+ * Called N times per Run Agent (once per contact that got an email attempt).
+ * Could be batched into a single UPDATE with CASE WHENs if we ever care about
+ * N round trips — for 1-8 contacts per run, individual updates are fine.
+ */
+export async function updateEmailInfo(input: UpdateEmailInfoInput): Promise<void> {
+  await pool.query(
+    `
+    UPDATE contacts
+       SET email              = $2,
+           email_verified     = $3,
+           email_found_via    = $4,
+           email_verified_via = $5,
+           last_activity      = now()
+     WHERE id = $1
+    `,
+    [
+      input.contactId,
+      input.email,
+      input.emailVerified,
+      input.emailFoundVia,
+      input.emailVerifiedVia,
+    ],
+  );
 }
 
 // ─── cross-run dedup lookup (soft dedup / Option A) ──────────────────────────

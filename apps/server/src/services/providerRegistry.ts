@@ -18,6 +18,8 @@
 
 import { logger } from '../logger.js';
 import type { DiscoverySource } from '../adapters/discovery/DiscoverySource.js';
+import type { EmailFinder } from '../adapters/emailFinder/EmailFinder.js';
+import type { EmailVerifier } from '../adapters/emailVerifier/EmailVerifier.js';
 
 // ─── base interface every registered adapter satisfies ───────────────────────
 
@@ -95,5 +97,8 @@ export class ProviderRegistry<T extends BaseAdapter> {
 /** All DiscoverySource adapters. */
 export const discoveryRegistry = new ProviderRegistry<DiscoverySource>();
 
-// `emailFinderRegistry` and `emailVerifierRegistry` land in slice 2 (phase 3.4
-// and 3.5). The architecture is ready for them — they'll follow the same shape.
+/** All EmailFinder adapters. SnovFinder first, PatternHeuristicFinder fallback. */
+export const emailFinderRegistry = new ProviderRegistry<EmailFinder>();
+
+/** All EmailVerifier adapters. ReoonVerifier is day-1. */
+export const emailVerifierRegistry = new ProviderRegistry<EmailVerifier>();

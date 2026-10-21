@@ -23,7 +23,11 @@ const EnvSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url(),
   GEMINI_API_KEY: z.string().min(1),
   SERPAPI_API_KEY: z.string().min(1),
-  HUNTER_API_KEY: z.preprocess(
+  SNOV_CLIENT_ID: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.string().min(1).optional(),
+  ),
+  SNOV_CLIENT_SECRET: z.preprocess(
     (v) => (v === '' ? undefined : v),
     z.string().min(1).optional(),
   ),
@@ -74,18 +78,19 @@ describe('env schema', () => {
     }
   });
 
-  it('allows HUNTER_API_KEY to be absent (optional until Phase 3.4)', () => {
+  it('allows SNOV_CLIENT_ID and SNOV_CLIENT_SECRET to be absent (optional)', () => {
     const env = { ...validEnv() };
     const result = EnvSchema.safeParse(env);
     expect(result.success).toBe(true);
   });
 
-  it('treats empty HUNTER_API_KEY same as absent', () => {
-    const env = { ...validEnv(), HUNTER_API_KEY: '' };
+  it('treats empty SNOV_CLIENT_ID same as absent', () => {
+    const env = { ...validEnv(), SNOV_CLIENT_ID: '', SNOV_CLIENT_SECRET: '' };
     const result = EnvSchema.safeParse(env);
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.HUNTER_API_KEY).toBeUndefined();
+      expect(result.data.SNOV_CLIENT_ID).toBeUndefined();
+      expect(result.data.SNOV_CLIENT_SECRET).toBeUndefined();
     }
   });
 
