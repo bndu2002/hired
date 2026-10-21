@@ -47,9 +47,15 @@ const EnvSchema = z.object({
   // Discovery
   SERPAPI_API_KEY: z.string().min(1),
 
-  // Email finder — optional in Phase 1; required once Phase 3.4 lands.
-  // Treat empty string the same as missing so `KEY=` in .env is allowed.
-  HUNTER_API_KEY: z.preprocess(
+  // Email finder — Snov.io (OAuth2 client credentials, not a single API key).
+  // Both optional at the schema level so you can run the server without Snov
+  // configured (SnovFinder won't register, PatternHeuristicFinder covers).
+  // Treat empty string the same as missing — allows `KEY=` in .env.
+  SNOV_CLIENT_ID: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.string().min(1).optional(),
+  ),
+  SNOV_CLIENT_SECRET: z.preprocess(
     (v) => (v === '' ? undefined : v),
     z.string().min(1).optional(),
   ),
