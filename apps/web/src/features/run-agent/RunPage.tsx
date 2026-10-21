@@ -262,6 +262,20 @@ function DiscoverErrorAlert({ error }: { error: unknown }) {
     | null
     | undefined;
 
+  if (error.status === 401) {
+    return (
+      <AlertCard tone="error" title="Server rejected the shared secret">
+        The dashboard's <code className="font-mono text-xs">X-Hired-Secret</code>{' '}
+        header is missing or doesn't match the server's{' '}
+        <code className="font-mono text-xs">SHARED_SECRET</code>. Verify{' '}
+        <code className="font-mono text-xs">apps/web/.env</code> has{' '}
+        <code className="font-mono text-xs">VITE_HIRED_SHARED_SECRET</code> set
+        to the same value as the server's{' '}
+        <code className="font-mono text-xs">SHARED_SECRET</code>, then restart{' '}
+        <code className="font-mono text-xs">pnpm --filter web dev</code>.
+      </AlertCard>
+    );
+  }
   if (error.status === 429) {
     return (
       <AlertCard tone="error" title="Daily cap reached">
@@ -271,9 +285,13 @@ function DiscoverErrorAlert({ error }: { error: unknown }) {
     );
   }
   if (error.status === 502) {
+    const isEmpty = body?.reason === 'empty_results';
     return (
-      <AlertCard tone="error" title="Discovery failed">
-        {body?.message ?? 'Every discovery adapter failed. Check SerpAPI key/quota.'}
+      <AlertCard tone={isEmpty ? 'info' : 'error'} title={isEmpty ? 'No contacts found' : 'Discovery failed'}>
+        {body?.message ??
+          (isEmpty
+            ? 'Discovery completed but found no profiles. Try a different job.'
+            : 'Every discovery adapter failed. Check SerpAPI key/quota.')}
       </AlertCard>
     );
   }
