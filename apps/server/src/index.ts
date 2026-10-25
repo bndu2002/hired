@@ -9,6 +9,7 @@
  */
 
 import express from 'express';
+import { OpenAiDiscoverySource } from './adapters/discovery/OpenAiDiscoverySource.js';
 import { SerpApiXRaySource } from './adapters/discovery/SerpApiXRaySource.js';
 import { PatternHeuristicFinder } from './adapters/emailFinder/PatternHeuristicFinder.js';
 import { SnovFinder } from './adapters/emailFinder/SnovFinder.js';
@@ -18,6 +19,7 @@ import { logger } from './logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { sharedSecret } from './middleware/sharedSecret.js';
 import { agentRouter } from './routes/agent.routes.js';
+import { discoveryTestRouter } from './routes/discoveryTest.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
 import {
   discoveryRegistry,
@@ -29,11 +31,29 @@ import {
 // inside createApp) means a single registration applies across tests + prod,
 // and tests can clear or override by re-importing the registry module.
 
-// ─── Discovery (D9 — India-only via SerpAPI X-ray + gl=in + post-filter) ───
-// Happy Agent's "Indian employees only" constraint. A Dubai-HQ company
-// hiring in India should still yield only its India-based employees — they
-// have authority over Indian hires. Hardcoded 'IN' for v1 personal tool;
-// per-job configurability (from location_hint) is a v2 target.
+// ─── Discovery (D9 — India-only) ──────────────────────────────────────────
+//
+// Primary: OpenAiDiscoverySource (web_search tool, Bing-backed). We confirmed
+// in R&D (see feat/discovery-llm-rd commits) that it reliably finds real
+// LinkedIn profiles across small AND large companies, where SerpAPI X-ray
+// via Google has decayed to near-zero for big consultancies.
+//
+// Fallback: SerpApiXRaySource. Kept registered second so the provider
+// registry's natural fallback chain kicks in when OpenAI 429s, times out,
+// or returns zero profile URLs. Also fires when OPENAI_API_KEY isn't set
+// at all (OpenAI registration is skipped in that case).
+//
+// Country is hardcoded 'India' / 'IN' for v1. Per-job configurability
+// (from the captured job's location_hint) is a v2 target.
+if (config.OPENAI_API_KEY) {
+  discoveryRegistry.register(
+    new OpenAiDiscoverySource(config.OPENAI_API_KEY, { country: 'India' }),
+  );
+} else {
+  logger.warn(
+    'OPENAI_API_KEY missing — OpenAiDiscoverySource not registered; SerpAPI X-ray is primary',
+  );
+}
 discoveryRegistry.register(
   new SerpApiXRaySource(config.SERPAPI_API_KEY, { restrictToCountry: 'IN' }),
 );
@@ -98,6 +118,9 @@ export function createApp(): express.Express {
 
   app.use('/api/jobs', jobsRouter);
   app.use('/api/agent', agentRouter);
+  // R&D only — compare OpenAI vs Gemini discovery adapters side-by-side.
+  // Remove or feature-flag before main merge once a winner is picked.
+  app.use('/api/discovery-test', discoveryTestRouter);
 
   app.use(errorHandler);
 
