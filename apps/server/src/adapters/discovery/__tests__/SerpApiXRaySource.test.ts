@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SerpApiXRaySource,
   buildXRayQuery,
+  normalizeCompanyNameForSearch,
   canonicalizeLinkedInUrl,
   extractNameFromTitle,
   extractRoleFromSnippet,
@@ -144,10 +145,10 @@ describe('canonicalizeLinkedInUrl', () => {
 });
 
 describe('buildXRayQuery', () => {
-  it('wraps company and roles correctly', () => {
+  it('wraps company and roles correctly using inurl: operator', () => {
     const q = buildXRayQuery('Appscrip', ['recruiter', 'engineering manager']);
     expect(q).toBe(
-      'site:linkedin.com/in "Appscrip" ("recruiter" OR "engineering manager")',
+      'inurl:linkedin.com/in "Appscrip" ("recruiter" OR "engineering manager")',
     );
   });
 
@@ -160,8 +161,58 @@ describe('buildXRayQuery', () => {
     const q = buildXRayQuery('Appscrip', ['recruiter'], 'IN');
     expect(q).toContain('"India"');
     expect(q).toBe(
-      'site:linkedin.com/in "Appscrip" "India" ("recruiter")',
+      'inurl:linkedin.com/in "Appscrip" "India" ("recruiter")',
     );
+  });
+
+  it('normalizes a company name with trailing geo marker before quoting', () => {
+    const q = buildXRayQuery('Accenture in India', ['recruiter'], 'IN');
+    expect(q).toContain('"Accenture"');
+    expect(q).not.toContain('"Accenture in India"');
+  });
+});
+
+describe('normalizeCompanyNameForSearch', () => {
+  it('strips "in India" suffix', () => {
+    expect(normalizeCompanyNameForSearch('Accenture in India')).toBe('Accenture');
+  });
+
+  it('strips bare "India" suffix', () => {
+    expect(normalizeCompanyNameForSearch('Infosys India')).toBe('Infosys');
+  });
+
+  it('strips "(India)" suffix', () => {
+    expect(normalizeCompanyNameForSearch('Infosys (India)')).toBe('Infosys');
+  });
+
+  it('strips "- India" suffix', () => {
+    expect(normalizeCompanyNameForSearch('TCS - India')).toBe('TCS');
+  });
+
+  it('strips "– India" with en-dash separator', () => {
+    expect(normalizeCompanyNameForSearch('TCS – India')).toBe('TCS');
+  });
+
+  it('preserves names where India is NOT at the end', () => {
+    expect(normalizeCompanyNameForSearch('India Infoline')).toBe('India Infoline');
+  });
+
+  it('preserves names without any geo marker', () => {
+    expect(normalizeCompanyNameForSearch('Appscrip')).toBe('Appscrip');
+  });
+
+  it('is case-insensitive for the geo word', () => {
+    expect(normalizeCompanyNameForSearch('Accenture in INDIA')).toBe('Accenture');
+    expect(normalizeCompanyNameForSearch('Infosys india')).toBe('Infosys');
+  });
+
+  it('does not reduce the name to empty when input is just "India"', () => {
+    // Edge: literal "India" would strip to empty; guard preserves it.
+    expect(normalizeCompanyNameForSearch('India')).toBe('India');
+  });
+
+  it('trims surrounding whitespace', () => {
+    expect(normalizeCompanyNameForSearch('  Accenture in India  ')).toBe('Accenture');
   });
 });
 
@@ -260,7 +311,7 @@ describe('SerpApiXRaySource.discover', () => {
     const calledUrl = String(spy.mock.calls[0]?.[0]);
     expect(calledUrl).toContain('serpapi.com/search.json');
     expect(decodeURIComponent(calledUrl)).toContain('"Appscrip"');
-    expect(decodeURIComponent(calledUrl)).toContain('site:linkedin.com/in');
+    expect(decodeURIComponent(calledUrl)).toContain('inurl:linkedin.com/in');
   });
 
   it('throws when SerpAPI returns a non-OK status', async () => {
