@@ -32,6 +32,10 @@ const EnvSchema = z.object({
     z.string().min(1).optional(),
   ),
   REOON_API_KEY: z.string().min(1),
+  OPENAI_API_KEY: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.string().min(1).optional(),
+  ),
 });
 
 function validEnv(): Record<string, string> {
@@ -91,6 +95,24 @@ describe('env schema', () => {
     if (result.success) {
       expect(result.data.SNOV_CLIENT_ID).toBeUndefined();
       expect(result.data.SNOV_CLIENT_SECRET).toBeUndefined();
+    }
+  });
+
+  it('allows OPENAI_API_KEY to be absent (optional)', () => {
+    const env = { ...validEnv() };
+    const result = EnvSchema.safeParse(env);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.OPENAI_API_KEY).toBeUndefined();
+    }
+  });
+
+  it('treats empty OPENAI_API_KEY same as absent', () => {
+    const env = { ...validEnv(), OPENAI_API_KEY: '' };
+    const result = EnvSchema.safeParse(env);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.OPENAI_API_KEY).toBeUndefined();
     }
   });
 

@@ -62,6 +62,15 @@ const EnvSchema = z.object({
 
   // Email verifier
   REOON_API_KEY: z.string().min(1),
+
+  // LLM-based discovery (R&D phase — one of these is picked after live comparison).
+  // Both optional at the schema level: Gemini uses GEMINI_API_KEY above,
+  // OpenAI requires its own key. Treat empty string as missing so a user
+  // without an OpenAI account can still boot.
+  OPENAI_API_KEY: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.string().min(1).optional(),
+  ),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

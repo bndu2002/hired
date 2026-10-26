@@ -26,6 +26,7 @@
  */
 
 import { z } from 'zod';
+import { logger } from '../../logger.js';
 import type {
   CandidateContact,
   DiscoveryInput,
@@ -214,17 +215,69 @@ export function canonicalizeLinkedInUrl(url: string): string {
   }
 }
 
+/**
+ * Normalize a company name for X-ray search.
+ *
+ * Happy Agent sometimes gives us names like "Accenture in India" where the
+ * geo marker is part of the posting's company field. LinkedIn profiles say
+ * just "Accenture" — the quoted phrase has to match something real, so we
+ * strip trailing geo markers (India for now; add more locales as needed).
+ *
+ * Only strips when the geo appears at the END of the name. "India Infoline"
+ * (where India is the actual company name) is preserved.
+ *
+ * Examples:
+ *   "Accenture in India"  → "Accenture"
+ *   "Infosys India"       → "Infosys"
+ *   "Infosys (India)"     → "Infosys"
+ *   "TCS - India"         → "TCS"
+ *   "India Infoline"      → "India Infoline"
+ *   "Appscrip"            → "Appscrip"
+ */
+export function normalizeCompanyNameForSearch(name: string): string {
+  // Match optional separator + optional "in " + "India" (whole word) at end.
+  //   \s*                 leading whitespace
+  //   [(\-–—]?            optional opening separator (paren, dash, en/em dash)
+  //   \s*
+  //   (in\s+)?            optional "in " prefix
+  //   india               the geo word, case-insensitive
+  //   \s*
+  //   \)?                 optional closing paren
+  //   \s*$                trailing whitespace to end of string
+  const trimmed = name.trim();
+  const stripped = trimmed
+    .replace(/\s*[(\-–—]?\s*(in\s+)?india\s*\)?\s*$/i, '')
+    .trim();
+  // Guard against stripping the entire name (e.g. input was literally "India").
+  return stripped.length > 0 ? stripped : trimmed;
+}
+
 export function buildXRayQuery(
   companyName: string,
   roles: readonly string[] = DEFAULT_ROLES,
   restrictToCountry?: RestrictCountry | undefined,
 ): string {
+  // Clean the name before quoting — see normalizeCompanyNameForSearch.
+  const cleaned = normalizeCompanyNameForSearch(companyName);
   const rolesClause = roles.map((r) => `"${r}"`).join(' OR ');
   // When restricted to India, we require "India" to appear somewhere on the
   // indexed LinkedIn page. Google indexes profile headlines, locations,
   // and about sections — so this catches location-tagged profiles directly.
   const countryClause = restrictToCountry === 'IN' ? ' "India"' : '';
-  return `site:linkedin.com/in "${companyName}"${countryClause} (${rolesClause})`;
+  // Why `inurl:` instead of `site:` — Google has largely stopped honoring
+  // `site:linkedin.com/in` for X-ray queries (LinkedIn pushed hard on
+  // de-indexing their profiles via robots.txt and other signals). The
+  // bare `site:linkedin.com/in "Deloitte"` returns zero profile URLs
+  // today — mostly Reddit/Glassdoor/corporate sites instead.
+  //
+  // `inurl:linkedin.com/in` is a looser constraint (any URL whose string
+  // contains that substring) but Google still respects it. Confirmed
+  // via direct SerpAPI probe: `inurl:` version returned 6 Deloitte
+  // profiles where the `site:` version returned 0.
+  //
+  // Our post-filter (`.link.includes('linkedin.com/in/')`) still rejects
+  // the non-profile pages that `inurl:` lets through (e.g., `linkedin.com/jobs/`).
+  return `inurl:linkedin.com/in "${cleaned}"${countryClause} (${rolesClause})`;
 }
 
 // ─── the adapter ─────────────────────────────────────────────────────────────
@@ -254,37 +307,98 @@ export class SerpApiXRaySource implements DiscoverySource {
     }
     url.searchParams.set('api_key', this.apiKey);
 
+    logger.info(
+      {
+        adapter: this.name,
+        companyName: input.companyName,
+        restrictToCountry: restrict ?? null,
+        query: q,
+      },
+      'serpapi x-ray: issuing query',
+    );
+
     const response = await fetch(url.toString());
     if (!response.ok) {
+      // Peek at the body for context — SerpAPI often returns JSON with a
+      // human-readable `error` field (bad api_key, quota exceeded, etc).
+      const bodyPeek = await response.text().catch(() => '');
+      logger.warn(
+        {
+          adapter: this.name,
+          status: response.status,
+          bodyPeek: bodyPeek.slice(0, 300),
+        },
+        'serpapi x-ray: non-2xx response',
+      );
       throw new Error(`SerpAPI request failed: ${response.status}`);
     }
 
     const raw = await response.json();
     const parsed = SerpApiResponse.parse(raw);
     if (parsed.error) {
+      logger.warn(
+        { adapter: this.name, serpapiError: parsed.error },
+        'serpapi x-ray: api-returned error field',
+      );
       throw new Error(`SerpAPI returned error: ${parsed.error}`);
     }
 
     const results = parsed.organic_results ?? [];
-    const candidates = results
-      .filter((r) => r.link.includes('linkedin.com/in/'))
-      .filter((r) => {
-        // Country post-filter: only applies when restrictToCountry is set.
-        if (restrict !== 'IN') return true;
-        return isIndianLocationSignal(r.snippet ?? '', r.link);
-      })
+    const rawCount = results.length;
+
+    const linkedinOnly = results.filter((r) => r.link.includes('linkedin.com/in/'));
+    const afterLinkedinFilter = linkedinOnly.length;
+
+    const indiaFiltered = linkedinOnly.filter((r) => {
+      // Country post-filter: only applies when restrictToCountry is set.
+      if (restrict !== 'IN') return true;
+      return isIndianLocationSignal(r.snippet ?? '', r.link);
+    });
+    const afterCountryFilter = indiaFiltered.length;
+
+    const parsedCandidates = indiaFiltered
       .map((r) => this.parseResult(r))
       .filter((c): c is CandidateContact => c !== null);
+    const afterParsing = parsedCandidates.length;
 
     // Deduplicate by canonicalized LinkedIn URL.
     const seen = new Set<string>();
     const unique: CandidateContact[] = [];
-    for (const c of candidates) {
+    for (const c of parsedCandidates) {
       const key = c.linkedinUrl ?? c.name;
       if (seen.has(key)) continue;
       seen.add(key);
       unique.push(c);
       if (unique.length >= input.limit) break;
+    }
+
+    logger.info(
+      {
+        adapter: this.name,
+        companyName: input.companyName,
+        funnel: {
+          serpapi_raw: rawCount,
+          after_linkedin_filter: afterLinkedinFilter,
+          after_country_filter: afterCountryFilter,
+          after_parsing: afterParsing,
+          final: unique.length,
+        },
+      },
+      'serpapi x-ray: discovery funnel',
+    );
+
+    // If we had results but filtered them all out, flag the first few so
+    // the user can see WHY they didn't survive — usually "not India" or
+    // a non-Latin profile URL that parseResult couldn't handle.
+    if (rawCount > 0 && unique.length === 0) {
+      const samples = results.slice(0, 3).map((r) => ({
+        link: r.link,
+        snippet: (r.snippet ?? '').slice(0, 140),
+      }));
+      logger.warn(
+        { adapter: this.name, companyName: input.companyName, samples },
+        'serpapi x-ray: had raw results but all filtered — review samples',
+      );
     }
 
     return unique;
