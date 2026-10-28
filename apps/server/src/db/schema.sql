@@ -123,3 +123,28 @@ CREATE TABLE IF NOT EXISTS provider_credits (
     last_reset          DATE DEFAULT (date_trunc('month', now()))::DATE,
     last_call_at        TIMESTAMPTZ
 );
+
+-- -----------------------------------------------------------------------------
+-- Google accounts connected via OAuth (Gmail). Added in migration 0004.
+-- Multi-account with roles: one install connects a 'linkedin_notifications'
+-- inbox (reads LinkedIn's accept/reply emails, read-only) and a 'sending'
+-- inbox (sends referral emails, reads own replies).
+-- Tokens are AES-256-GCM encrypted by the APP before insert (node crypto,
+-- TOKEN_ENCRYPTION_KEY) — the DB only ever holds ciphertext.
+-- gmail_history_id is the incremental users.history poll watermark.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS google_accounts (
+    id                   SERIAL PRIMARY KEY,
+    email                VARCHAR(255) NOT NULL,
+    role                 VARCHAR(32)  NOT NULL,   -- 'linkedin_notifications' | 'sending'
+    access_token_enc     TEXT         NOT NULL,   -- AES-256-GCM ciphertext
+    refresh_token_enc    TEXT         NOT NULL,   -- AES-256-GCM ciphertext
+    token_expiry         TIMESTAMPTZ,
+    scopes               TEXT,
+    gmail_history_id     VARCHAR(64),
+    connected_at         TIMESTAMPTZ DEFAULT now(),
+    last_polled_at       TIMESTAMPTZ,
+    UNIQUE (email, role)
+);
+
+CREATE INDEX IF NOT EXISTS idx_google_accounts_role ON google_accounts(role);

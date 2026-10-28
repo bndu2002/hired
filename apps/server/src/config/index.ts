@@ -44,6 +44,15 @@ const EnvSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url(),
   GEMINI_API_KEY: z.string().min(1),
 
+  // Encryption key for Gmail OAuth tokens at rest (D2 — tokens never stored
+  // plaintext). 32-byte hex = 64 chars → AES-256. Generate once with:
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  // Separate from SHARED_SECRET so rotating one doesn't invalidate the other.
+  TOKEN_ENCRYPTION_KEY: z
+    .string()
+    .length(64, 'TOKEN_ENCRYPTION_KEY must be 64 hex chars (32 bytes)')
+    .regex(/^[0-9a-fA-F]+$/, 'TOKEN_ENCRYPTION_KEY must be hex'),
+
   // Discovery
   SERPAPI_API_KEY: z.string().min(1),
 

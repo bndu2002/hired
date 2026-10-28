@@ -19,6 +19,7 @@ import { logger } from './logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { sharedSecret } from './middleware/sharedSecret.js';
 import { agentRouter } from './routes/agent.routes.js';
+import { authPublicRouter, authProtectedRouter } from './routes/auth.routes.js';
 import { discoveryTestRouter } from './routes/discoveryTest.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
 import {
@@ -113,11 +114,20 @@ export function createApp(): express.Express {
     res.json({ ok: true, version: '0.0.1' });
   });
 
+  // Public OAuth endpoints: reached via full-page browser navigation and
+  // Google's redirect, which cannot carry the X-Hired-Secret header. Mounted
+  // BEFORE the shared-secret gate. Safe because: loopback-only bind, the
+  // consent flow is nonce-protected, and the callback only ever stores tokens
+  // for accounts the user themselves authorized in Google's own consent UI.
+  app.use('/api/auth', authPublicRouter);
+
   // Everything below this line requires the shared secret.
   app.use('/api', sharedSecret);
 
   app.use('/api/jobs', jobsRouter);
   app.use('/api/agent', agentRouter);
+  // Protected OAuth endpoints (list/disconnect) — normal dashboard XHR.
+  app.use('/api/auth', authProtectedRouter);
   // R&D only — compare OpenAI vs Gemini discovery adapters side-by-side.
   // Remove or feature-flag before main merge once a winner is picked.
   app.use('/api/discovery-test', discoveryTestRouter);
