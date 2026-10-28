@@ -22,6 +22,10 @@ const EnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().min(1),
   GOOGLE_REDIRECT_URI: z.string().url(),
   GEMINI_API_KEY: z.string().min(1),
+  TOKEN_ENCRYPTION_KEY: z
+    .string()
+    .length(64)
+    .regex(/^[0-9a-fA-F]+$/),
   SERPAPI_API_KEY: z.string().min(1),
   SNOV_CLIENT_ID: z.preprocess(
     (v) => (v === '' ? undefined : v),
@@ -46,6 +50,7 @@ function validEnv(): Record<string, string> {
     GOOGLE_CLIENT_SECRET: 'secret',
     GOOGLE_REDIRECT_URI: 'http://localhost:4000/cb',
     GEMINI_API_KEY: 'k',
+    TOKEN_ENCRYPTION_KEY: 'a'.repeat(64),
     SERPAPI_API_KEY: 'k',
     REOON_API_KEY: 'k',
   };
@@ -114,6 +119,18 @@ describe('env schema', () => {
     if (result.success) {
       expect(result.data.OPENAI_API_KEY).toBeUndefined();
     }
+  });
+
+  it('rejects a TOKEN_ENCRYPTION_KEY that is not 64 hex chars', () => {
+    const env = { ...validEnv(), TOKEN_ENCRYPTION_KEY: 'tooshort' };
+    const result = EnvSchema.safeParse(env);
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a TOKEN_ENCRYPTION_KEY with non-hex characters', () => {
+    const env = { ...validEnv(), TOKEN_ENCRYPTION_KEY: 'z'.repeat(64) };
+    const result = EnvSchema.safeParse(env);
+    expect(result.success).toBe(false);
   });
 
   it('coerces PORT from string', () => {
