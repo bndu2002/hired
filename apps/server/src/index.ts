@@ -18,6 +18,10 @@ import { config } from './config/index.js';
 import { logger } from './logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { sharedSecret } from './middleware/sharedSecret.js';
+import {
+  startInboundPollCron,
+  stopInboundPollCron,
+} from './jobs/inboundPoll.cron.js';
 import { agentRouter } from './routes/agent.routes.js';
 import { authPublicRouter, authProtectedRouter } from './routes/auth.routes.js';
 import { discoveryTestRouter } from './routes/discoveryTest.routes.js';
@@ -145,10 +149,15 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
       { port: config.PORT, env: config.NODE_ENV },
       'hired server booted',
     );
+    // Start the inbound poll AFTER the HTTP server is listening so the
+    // process is observably alive before background traffic starts. The
+    // cron is a no-op when no Gmail accounts are connected yet.
+    startInboundPollCron(config.NODE_ENV);
   });
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, 'shutting down');
+    stopInboundPollCron();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 5000).unref();
   };

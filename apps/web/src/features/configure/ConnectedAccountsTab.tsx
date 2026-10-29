@@ -30,6 +30,20 @@ interface RoleSpec {
   readonly Icon: typeof Mail;
 }
 
+/**
+ * Humanize an ISO timestamp as "Ns ago" / "Nm ago" / "Nh ago" / "Nd ago".
+ * Mirrors the helper in JobCard.tsx; kept local here for now — if a third
+ * caller shows up we'll lift to shared/.
+ */
+function timeAgo(iso: string): string {
+  const diffSec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (diffSec < 10) return 'just now';
+  if (diffSec < 60) return `${Math.round(diffSec)}s ago`;
+  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
+  if (diffSec < 86_400) return `${Math.round(diffSec / 3600)}h ago`;
+  return `${Math.round(diffSec / 86_400)}d ago`;
+}
+
 const ROLES: readonly RoleSpec[] = [
   {
     role: 'linkedin_notifications',
@@ -122,6 +136,21 @@ export function ConnectedAccountsTab() {
                           </Badge>
                           <span className="truncate text-sm text-slate-700">
                             {acct.email}
+                          </span>
+                          {/* Poll freshness — lets Vandana see at a glance that
+                              the tracking engine is alive and when it last ran
+                              against this account's inbox. */}
+                          <span
+                            className="shrink-0 text-xs text-slate-400"
+                            title={
+                              acct.lastPolledAt
+                                ? new Date(acct.lastPolledAt).toLocaleString()
+                                : 'The inbound-poll cron hasn\u2019t run against this account yet; first tick fires ~2s after server boot.'
+                            }
+                          >
+                            {acct.lastPolledAt
+                              ? `polled ${timeAgo(acct.lastPolledAt)}`
+                              : 'awaiting first poll'}
                           </span>
                         </div>
                         <Button

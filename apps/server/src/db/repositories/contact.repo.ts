@@ -24,6 +24,9 @@ export interface Contact {
   linkedinUrl: string | null;
   gmailStatus: GmailStatus;
   linkedinStatus: LinkedinStatus;
+  /** Gmail thread id if we've already sent them an email; used by the poller
+   *  to correlate inbound email replies back to the right contact. */
+  gmailThreadId: string | null;
   discoveredVia: string | null;
   createdAt: string;
 }
@@ -41,6 +44,7 @@ interface ContactRow {
   linkedin_url: string | null;
   gmail_status: string;
   linkedin_status: string;
+  gmail_thread_id: string | null;
   discovered_via: string | null;
   created_at: Date;
 }
@@ -59,6 +63,7 @@ function rowToContact(r: ContactRow): Contact {
     linkedinUrl: r.linkedin_url,
     gmailStatus: r.gmail_status as GmailStatus,
     linkedinStatus: r.linkedin_status as LinkedinStatus,
+    gmailThreadId: r.gmail_thread_id,
     discoveredVia: r.discovered_via,
     createdAt: r.created_at.toISOString(),
   };
@@ -221,4 +226,97 @@ export async function findPreviousByLinkedinUrls(
   }
 
   return result;
+}
+
+
+// ─── poller lookups ─────────────────────────────────────────────────────────
+
+import type { LinkedinStatus as LinkedinStatusType, GmailStatus as GmailStatusType } from '@hired/types';
+import { extractLinkedInSlug } from '../../core/linkedinNotificationParser.js';
+
+/**
+ * Look up the most recent contact whose linkedin_url matches the given URL.
+ *
+ * Matches by slug (the `/in/<slug>` portion) because different subsystems
+ * store different subdomains for the same person — discovery via SerpAPI
+ * often stores `in.linkedin.com/in/foo`, while LinkedIn's notification
+ * emails use `www.linkedin.com/in/foo`. Both resolve to slug=`foo` and we
+ * want them to match. Case-insensitive comparison on the slug.
+ *
+ * When a person was discovered in multiple runs, we return the most recent
+ * row (ORDER BY id DESC) — that's the one whose status we want to update.
+ */
+export async function findByLinkedinUrl(url: string): Promise<Contact | null> {
+  const slug = extractLinkedInSlug(url);
+  if (!slug) return null;
+
+  // Match any linkedin_url whose path ends with /in/<slug> (optionally
+  // followed by / or query string). Case-insensitive. Escape SQL LIKE
+  // metacharacters in the slug just in case a stored one has `%` or `_`.
+  const escaped = slug.replace(/[%_\\]/g, (c) => `\\${c}`);
+  const result = await pool.query<ContactRow>(
+    `SELECT * FROM contacts
+       WHERE linkedin_url ILIKE $1 ESCAPE '\\'
+       ORDER BY id DESC
+       LIMIT 1`,
+    [`%/in/${escaped}%`],
+  );
+  const row = result.rows[0];
+  return row ? rowToContact(row) : null;
+}
+
+/**
+ * Look up the contact we previously sent email to on this Gmail thread.
+ * Used by the poller when a reply lands in our sending inbox: we match the
+ * reply's thread id back to the contact that originated the outbound.
+ */
+export async function findByGmailThreadId(threadId: string): Promise<Contact | null> {
+  const result = await pool.query<ContactRow>(
+    `SELECT * FROM contacts
+       WHERE gmail_thread_id = $1
+       ORDER BY id DESC
+       LIMIT 1`,
+    [threadId],
+  );
+  const row = result.rows[0];
+  return row ? rowToContact(row) : null;
+}
+
+// ─── derived-cache status writes ────────────────────────────────────────────
+//
+// The event log is source of truth (D3). These setters just maintain the
+// derived cache on the contact row — callers (poller, orchestrator) are
+// responsible for computing the next status via core/stateMachines.ts and
+// appending the matching event via event.repo.ts in the same logical
+// operation.
+
+/**
+ * Set linkedin_status on a contact row and bump last_activity. Used by the
+ * poller after appending a LinkedIn event. The orchestrator uses this too
+ * when it writes outbound-side events (connect_sent, dm_sent).
+ */
+export async function updateLinkedinStatus(
+  contactId: number,
+  status: LinkedinStatusType,
+): Promise<void> {
+  await pool.query(
+    `UPDATE contacts
+        SET linkedin_status = $2,
+            last_activity   = now()
+      WHERE id = $1`,
+    [contactId, status],
+  );
+}
+
+export async function updateGmailStatus(
+  contactId: number,
+  status: GmailStatusType,
+): Promise<void> {
+  await pool.query(
+    `UPDATE contacts
+        SET gmail_status  = $2,
+            last_activity = now()
+      WHERE id = $1`,
+    [contactId, status],
+  );
 }
