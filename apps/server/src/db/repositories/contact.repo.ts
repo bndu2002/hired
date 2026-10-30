@@ -27,6 +27,10 @@ export interface Contact {
   /** Gmail thread id if we've already sent them an email; used by the poller
    *  to correlate inbound email replies back to the right contact. */
   gmailThreadId: string | null;
+  /** Rendered LinkedIn DM text, populated by the inbound poller when it
+   *  auto-drafts after a connection acceptance. Null until the auto-draft
+   *  (or a future manual-draft UI) runs. The Queue surface reads this. */
+  linkedinDmDraft: string | null;
   discoveredVia: string | null;
   createdAt: string;
 }
@@ -45,6 +49,7 @@ interface ContactRow {
   gmail_status: string;
   linkedin_status: string;
   gmail_thread_id: string | null;
+  linkedin_dm_draft: string | null;
   discovered_via: string | null;
   created_at: Date;
 }
@@ -64,6 +69,7 @@ function rowToContact(r: ContactRow): Contact {
     gmailStatus: r.gmail_status as GmailStatus,
     linkedinStatus: r.linkedin_status as LinkedinStatus,
     gmailThreadId: r.gmail_thread_id,
+    linkedinDmDraft: r.linkedin_dm_draft,
     discoveredVia: r.discovered_via,
     createdAt: r.created_at.toISOString(),
   };
@@ -319,4 +325,107 @@ export async function updateGmailStatus(
       WHERE id = $1`,
     [contactId, status],
   );
+}
+
+/**
+ * Set the selected_for_* flags on a contact row. Called by the orchestrator
+ * at the send phase so the dashboard can show "X was selected for LinkedIn
+ * in this run" without replaying the event stream.
+ *
+ * The source of truth is still the `contact_selected` event; this is just
+ * the derived cache. See .kiro/specs/hired/design.md § 3 (D3).
+ */
+export async function updateSelection(
+  contactId: number,
+  selection: { gmail: boolean; linkedin: boolean },
+): Promise<void> {
+  await pool.query(
+    `UPDATE contacts
+        SET selected_for_gmail    = $2,
+            selected_for_linkedin = $3,
+            last_activity         = now()
+      WHERE id = $1`,
+    [contactId, selection.gmail, selection.linkedin],
+  );
+}
+
+/**
+ * Store a rendered LinkedIn DM draft on a contact row. Called by the inbound
+ * poller when it detects a connection acceptance — the DM template gets
+ * rendered against the contact's data and stashed here so the Queue UI can
+ * display it later. Separate from the `linkedin_dm_drafted` event payload
+ * for ergonomics: the Queue only needs the draft text, and querying the
+ * contact row is cheaper than replaying events.
+ */
+export async function updateLinkedinDmDraft(
+  contactId: number,
+  draft: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE contacts
+        SET linkedin_dm_draft = $2,
+            last_activity     = now()
+      WHERE id = $1`,
+    [contactId, draft],
+  );
+}
+
+/**
+ * The Queue UI's contact view: a contact row plus the minimal Job context
+ * needed to render "connecting about {jobTitle} at {companyName}". A JOIN
+ * saves N+1 queries vs listByLinkedinStatus + per-contact job lookups.
+ */
+export interface ContactWithJob extends Contact {
+  job: {
+    id: number;
+    companyName: string;
+    jobTitle: string;
+  };
+}
+
+interface ContactWithJobRow extends ContactRow {
+  job_id: number;
+  job_company_name: string;
+  job_title: string;
+}
+
+function rowToContactWithJob(r: ContactWithJobRow): ContactWithJob {
+  return {
+    ...rowToContact(r),
+    job: {
+      id: r.job_id,
+      companyName: r.job_company_name,
+      jobTitle: r.job_title,
+    },
+  };
+}
+
+/**
+ * All contacts currently in the given LinkedIn status, enriched with their
+ * owning Job's company + title. Sorted newest-first (by contact id) so the
+ * Queue's "Next" button advances through recent work first — matches user
+ * intuition after they just hit Send.
+ *
+ * Powers both `linkedinQueue.listConnect()` (status=CONNECT_DRAFTED) and
+ * `linkedinQueue.listDm()` (status=DM_DRAFTED). Keeping the SQL generic so
+ * future states (DM_SENT history view, DECLINED archive) reuse it.
+ */
+export async function listWithJobByLinkedinStatus(
+  status: LinkedinStatus,
+): Promise<ContactWithJob[]> {
+  const result = await pool.query<ContactWithJobRow>(
+    `
+    SELECT c.*,
+           j.id           AS job_id,
+           j.company_name AS job_company_name,
+           j.job_title    AS job_title
+      FROM contacts c
+      JOIN runs r ON r.id = c.run_id
+      JOIN jobs j ON j.id = r.job_id
+     WHERE c.linkedin_status = $1
+     ORDER BY c.id DESC
+    `,
+    [status],
+  );
+  return result.rows.map(rowToContactWithJob);
 }

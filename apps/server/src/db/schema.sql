@@ -148,3 +148,15 @@ CREATE TABLE IF NOT EXISTS google_accounts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_google_accounts_role ON google_accounts(role);
+
+-- -----------------------------------------------------------------------------
+-- Application settings — generic KV store (migration 0005).
+-- Hosts {{var}}-templated outreach copy (linkedin.connect_template,
+-- linkedin.dm_template) and future user preferences. Hierarchical keys by
+-- convention; not enforced in schema.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT         PRIMARY KEY,
+    value       TEXT         NOT NULL,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
