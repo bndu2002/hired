@@ -24,6 +24,7 @@ import {
 } from './jobs/inboundPoll.cron.js';
 import { agentRouter } from './routes/agent.routes.js';
 import { authPublicRouter, authProtectedRouter } from './routes/auth.routes.js';
+import { devRouter } from './routes/dev.routes.js';
 import { discoveryTestRouter } from './routes/discoveryTest.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
 import {
@@ -135,6 +136,10 @@ export function createApp(): express.Express {
   // R&D only — compare OpenAI vs Gemini discovery adapters side-by-side.
   // Remove or feature-flag before main merge once a winner is picked.
   app.use('/api/discovery-test', discoveryTestRouter);
+  // Dev-only — live-validate the inbound-poll pipeline against real Gmail
+  // messages (list recent LinkedIn emails, replay one through processMessage).
+  // Feature-flag or remove before main merge.
+  app.use('/api/dev', devRouter);
 
   app.use(errorHandler);
 

@@ -78,12 +78,18 @@ const MESSAGE_SUBJECT_PATTERNS: readonly RegExp[] = [
 
 /**
  * Direct LinkedIn profile URL. Handles common subdomains (www, in, de, uk,
- * au, ca, br, fr, etc.) and bare `linkedin.com`. Does NOT match /jobs/,
- * /company/, /posts/, /messaging/, /comm/ etc. Not greedy — stops at the
- * first non-URL character (whitespace, quote, >, etc.).
+ * au, ca, br, fr, etc.) and bare `linkedin.com`. Also handles LinkedIn's
+ * tracked-click prefix `/comm/` that modern notification emails insert
+ * between the host and `/in/<slug>` (e.g. `in.linkedin.com/comm/in/kartik`).
+ * The `/comm/` segment is stripped in `normalizeProfileUrl` so the canonical
+ * form is `host/in/<slug>` regardless of source.
+ *
+ * Does NOT match /jobs/, /company/, /posts/, /messaging/, /comm/notifications
+ * etc. Not greedy — stops at the first non-URL character (whitespace, quote,
+ * `?`, `>`, etc.).
  */
 const PROFILE_URL_RE =
-  /https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/[A-Za-z0-9_%-]+/gi;
+  /https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com(?:\/comm)?\/in\/[A-Za-z0-9_%-]+/gi;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -128,6 +134,10 @@ export function normalizeProfileUrl(url: string): string {
   let out = url.replace(/[.,;:!?)\]'">]+$/, '');
   // Collapse trailing slashes.
   out = out.replace(/\/+$/, '');
+  // LinkedIn routes email-notification clicks through `/comm/` for tracking —
+  // strip the prefix so the canonical form matches what the discovery stage
+  // stores (which uses the direct `linkedin.com/in/<slug>` shape).
+  out = out.replace(/(linkedin\.com)\/comm\/in\//i, '$1/in/');
   return out;
 }
 

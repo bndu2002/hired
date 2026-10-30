@@ -27,7 +27,7 @@
  */
 
 import type { gmail_v1 } from 'googleapis';
-import type { AppEvent } from '@hired/types';
+import type { AppEvent, GmailStatus, LinkedinStatus } from '@hired/types';
 import { makeEvent } from '../core/events.js';
 import {
   parseLinkedInNotification,
@@ -151,7 +151,7 @@ export async function pollAccount(accountId: number): Promise<PollResult> {
 
   for (const id of messageIds) {
     try {
-      const outcome = await processMessage(gmail, id, account.role);
+      const { outcome } = await processMessage(gmail, id, account.role);
       if (outcome === 'linkedin_accept') linkedinAccepts++;
       else if (outcome === 'linkedin_reply') linkedinReplies++;
       else if (outcome === 'gmail_reply') gmailReplies++;
@@ -261,70 +261,153 @@ async function collectNewMessageIds(
   return Array.from(seen);
 }
 
-type MessageOutcome =
+export type MessageOutcome =
   | 'linkedin_accept'
   | 'linkedin_reply'
   | 'gmail_reply'
   | 'untracked';
 
 /**
- * Pull one message, extract the headers + body, and route to the right
- * handler. Returns a short tag describing what we did so the caller can
- * count outcomes.
+ * Rich result from processing one message. The poller's hot path only reads
+ * `.outcome`; the dev endpoint reads everything (what the parser extracted,
+ * which contact was matched, what the status transition was, why we skipped).
  */
-async function processMessage(
+export interface ProcessMessageResult {
+  readonly outcome: MessageOutcome;
+  readonly debug: {
+    readonly from: string;
+    readonly subject: string;
+    readonly threadId: string | null;
+    /** First 500 chars of each body — enough to eyeball, bounded for logs. */
+    readonly textBodyPreview: string;
+    readonly htmlBodyPreview: string;
+    readonly parsed: LinkedInNotification | null;
+    readonly matchedContactId: number | null;
+    readonly matchedContactName: string | null;
+    /** Status before/after for whichever channel this event affected. */
+    readonly statusChange:
+      | {
+          channel: 'linkedin';
+          from: LinkedinStatus;
+          to: LinkedinStatus;
+        }
+      | {
+          channel: 'gmail';
+          from: GmailStatus;
+          to: GmailStatus;
+        }
+      | null;
+    /** Human-readable reason when outcome is 'untracked'. */
+    readonly skipReason: string | null;
+  };
+}
+
+/**
+ * Pull one message, extract the headers + body, and route to the right
+ * handler. Returns an outcome tag + debug payload. The poller discards debug;
+ * the dev endpoint uses it to verify the pipeline on real messages.
+ */
+export async function processMessage(
   gmail: gmail_v1.Gmail,
   messageId: string,
   role: 'linkedin_notifications' | 'sending',
-): Promise<MessageOutcome> {
+): Promise<ProcessMessageResult> {
   const res = await gmail.users.messages.get({
     userId: 'me',
     id: messageId,
     format: 'full',
   });
   const msg = res.data;
-  const threadId = msg.threadId;
+  const threadId = msg.threadId ?? null;
   const headers = headerMap(msg.payload?.headers ?? []);
   const from = headers.get('from') ?? '';
   const subject = headers.get('subject') ?? '';
   const { textBody, htmlBody } = extractBodies(msg.payload);
 
+  const baseDebug = {
+    from,
+    subject,
+    threadId,
+    textBodyPreview: textBody.slice(0, 500),
+    htmlBodyPreview: htmlBody.slice(0, 500),
+  };
+
   // Path 1: LinkedIn notification (either inbox could see one).
   const parsed = parseLinkedInNotification({ from, subject, textBody, htmlBody });
   if (parsed) {
-    return handleLinkedInNotification(parsed, messageId);
+    return handleLinkedInNotification(parsed, messageId, baseDebug);
   }
 
   // Path 2: email reply correlation — only on the sending inbox, and only if
   // this message is on a thread we have a contact for.
   if (role === 'sending' && threadId) {
-    const matched = await handleGmailThreadReply(threadId);
-    if (matched) return 'gmail_reply';
+    const gmailResult = await handleGmailThreadReply(threadId, baseDebug);
+    if (gmailResult) return gmailResult;
   }
 
-  return 'untracked';
+  return {
+    outcome: 'untracked',
+    debug: {
+      ...baseDebug,
+      parsed: null,
+      matchedContactId: null,
+      matchedContactName: null,
+      statusChange: null,
+      skipReason:
+        role === 'sending' && !threadId
+          ? 'not a LinkedIn notification and no thread id'
+          : 'not a LinkedIn notification; no matching gmail thread',
+    },
+  };
 }
+
+type BaseDebug = {
+  readonly from: string;
+  readonly subject: string;
+  readonly threadId: string | null;
+  readonly textBodyPreview: string;
+  readonly htmlBodyPreview: string;
+};
 
 async function handleLinkedInNotification(
   parsed: LinkedInNotification,
   gmailMessageId: string,
-): Promise<MessageOutcome> {
+  baseDebug: BaseDebug,
+): Promise<ProcessMessageResult> {
   // Both branches need a profile URL to find the contact. The parser
   // guarantees it for 'connect_accepted'; for 'message_received' it may be
   // null, in which case we can't correlate without a thread-level signal
   // (LinkedIn notifications don't thread by sender, so we have no fallback).
-  const linkedinUrl =
-    parsed.kind === 'connect_accepted' ? parsed.linkedinUrl : parsed.linkedinUrl;
+  const linkedinUrl = parsed.linkedinUrl;
   if (!linkedinUrl) {
-    return 'untracked';
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed,
+        matchedContactId: null,
+        matchedContactName: null,
+        statusChange: null,
+        skipReason: 'no profile URL in message body — cannot correlate',
+      },
+    };
   }
 
   const contact = await contactRepo.findByLinkedinUrl(linkedinUrl);
   if (!contact) {
-    // Received a legit LinkedIn notification but the person isn't in our DB
-    // (connection from before we started using the tool, personal network,
-    // etc). Not an error — just untracked.
-    return 'untracked';
+    // Legit LinkedIn notification but the person isn't in our DB (connection
+    // from before we started using the tool, personal network, etc).
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed,
+        matchedContactId: null,
+        matchedContactName: null,
+        statusChange: null,
+        skipReason: `no contact in DB with linkedin_url matching ${linkedinUrl}`,
+      },
+    };
   }
 
   let event: AppEvent;
@@ -351,26 +434,69 @@ async function handleLinkedInNotification(
       },
       'gmail poll: skipping linkedin event (illegal/redundant for current status)',
     );
-    return 'untracked';
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed,
+        matchedContactId: contact.id,
+        matchedContactName: contact.name,
+        statusChange: null,
+        skipReason: `event ${event.type} illegal from status ${contact.linkedinStatus}`,
+      },
+    };
   }
 
   const nextStatus = nextLinkedinStatus(contact.linkedinStatus, event);
   if (nextStatus === contact.linkedinStatus) {
-    // Idempotent — status wouldn't change. Still append the event for the
-    // audit trail (D3: events are append-only truth), but no need to touch
-    // the derived cache.
-    await eventRepo.append(contact.id, event);
-    return 'untracked';
+    // Idempotent no-op — the state machine's `canApplyLinkedinEvent` already
+    // allowed it (so this isn't a programmer error), and status won't change.
+    // Skip the append entirely: `fromGmailMessageId` on the FIRST append is
+    // already the audit trail for this real-world occurrence. Re-encountering
+    // the same message (watermark rebaseline after a history-expired 404,
+    // dev-endpoint replay, duplicate Gmail delivery) should NOT bloat the
+    // event log — idempotency means safe to call again with no side effects.
+    //
+    // D3's "events are append-only" is about never mutating existing rows;
+    // it's not a license to write duplicate rows for the same event.
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed,
+        matchedContactId: contact.id,
+        matchedContactName: contact.name,
+        statusChange: null,
+        skipReason: `already in status ${contact.linkedinStatus}; duplicate ${event.type} skipped`,
+      },
+    };
   }
 
   await eventRepo.append(contact.id, event);
   await contactRepo.updateLinkedinStatus(contact.id, nextStatus);
-  return parsed.kind === 'connect_accepted' ? 'linkedin_accept' : 'linkedin_reply';
+  return {
+    outcome: parsed.kind === 'connect_accepted' ? 'linkedin_accept' : 'linkedin_reply',
+    debug: {
+      ...baseDebug,
+      parsed,
+      matchedContactId: contact.id,
+      matchedContactName: contact.name,
+      statusChange: {
+        channel: 'linkedin',
+        from: contact.linkedinStatus,
+        to: nextStatus,
+      },
+      skipReason: null,
+    },
+  };
 }
 
-async function handleGmailThreadReply(threadId: string): Promise<boolean> {
+async function handleGmailThreadReply(
+  threadId: string,
+  baseDebug: BaseDebug,
+): Promise<ProcessMessageResult | null> {
   const contact = await contactRepo.findByGmailThreadId(threadId);
-  if (!contact) return false;
+  if (!contact) return null; // caller will fall through to 'untracked'
 
   const event: AppEvent = makeEvent('reply_received', {
     channel: 'gmail',
@@ -385,18 +511,55 @@ async function handleGmailThreadReply(threadId: string): Promise<boolean> {
       },
       'gmail poll: skipping gmail event (illegal/redundant for current status)',
     );
-    return false;
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed: null,
+        matchedContactId: contact.id,
+        matchedContactName: contact.name,
+        statusChange: null,
+        skipReason: `event ${event.type} illegal from gmail status ${contact.gmailStatus}`,
+      },
+    };
   }
 
   const nextStatus = nextGmailStatus(contact.gmailStatus, event);
   if (nextStatus === contact.gmailStatus) {
-    await eventRepo.append(contact.id, event);
-    return false;
+    // Idempotent no-op — see the matching comment in
+    // handleLinkedInNotification. The first `reply_received` append is the
+    // audit trail; further observations of the same thread shouldn't bloat
+    // the log.
+    return {
+      outcome: 'untracked',
+      debug: {
+        ...baseDebug,
+        parsed: null,
+        matchedContactId: contact.id,
+        matchedContactName: contact.name,
+        statusChange: null,
+        skipReason: `already in gmail status ${contact.gmailStatus}; duplicate reply_received skipped`,
+      },
+    };
   }
 
   await eventRepo.append(contact.id, event);
   await contactRepo.updateGmailStatus(contact.id, nextStatus);
-  return true;
+  return {
+    outcome: 'gmail_reply',
+    debug: {
+      ...baseDebug,
+      parsed: null,
+      matchedContactId: contact.id,
+      matchedContactName: contact.name,
+      statusChange: {
+        channel: 'gmail',
+        from: contact.gmailStatus,
+        to: nextStatus,
+      },
+      skipReason: null,
+    },
+  };
 }
 
 // ─── MIME-shape helpers ─────────────────────────────────────────────────────

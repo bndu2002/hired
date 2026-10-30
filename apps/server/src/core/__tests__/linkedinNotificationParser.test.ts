@@ -139,6 +139,39 @@ describe('parseLinkedInNotification — connect_accepted', () => {
     );
     expect(r?.kind).toBe('connect_accepted');
   });
+
+  it('handles the real LinkedIn tracked-click URL shape (/comm/in/<slug>)', () => {
+    // Captured 2026-10-15 from the actual "Kartik accepted your invitation"
+    // email — plaintext part is almost empty, profile URLs live in the HTML
+    // body wrapped in `/comm/` click-tracking redirects with long query
+    // strings. The parser should extract the accepter's slug and strip the
+    // /comm/ prefix in the normalized output.
+    const htmlBody = `
+      <html><body>
+        <p>Kartik Mogalapalli accepted your invitation.</p>
+        <a href="https://in.linkedin.com/comm/in/ahamasmikartik?lipi=urn%3Ali%3Apage%3Aemail_email_accept_invite_single_01&amp;trk=eml-email_accept_invite_single_01-email~accept~invite~single-0-profile_image">
+          <img src="..." />
+        </a>
+        <a href="https://in.linkedin.com/comm/in/ahamasmikartik?lipi=urn%3Ali%3Apage%3A&amp;trk=eml-...-name">
+          Kartik Mogalapalli
+        </a>
+        <p>People you may know:</p>
+        <a href="https://in.linkedin.com/comm/in/navin-mamgai-13282a43?lipi=...">Navin Mamgai</a>
+      </body></html>
+    `;
+    const r = parseLinkedInNotification(
+      msg({
+        from: 'Kartik Mogalapalli via LinkedIn <invitations@linkedin.com>',
+        subject: 'Kartik accepted your invitation, explore their network',
+        textBody: 'This email was intended for Vandana Sharma',
+        htmlBody,
+      }),
+    );
+    expect(r).toEqual({
+      kind: 'connect_accepted',
+      linkedinUrl: 'https://in.linkedin.com/in/ahamasmikartik',
+    });
+  });
 });
 
 describe('parseLinkedInNotification — message_received', () => {
@@ -238,6 +271,29 @@ describe('extractFirstProfileUrl', () => {
     expect(extractFirstProfileUrl(text, '')).toBe(text);
     expect(extractFirstProfileUrl(text, '')).toBe(text);
   });
+
+  it('matches LinkedIn tracked-click /comm/in/<slug> URLs', () => {
+    // Real email shape — `/comm/` prefix inserted for click tracking. The
+    // regex now accepts it; normalize strips it so downstream matching
+    // against discovery-stored URLs works via slug equality.
+    expect(
+      extractFirstProfileUrl(
+        'see https://in.linkedin.com/comm/in/ahamasmikartik?lipi=urn%3A',
+        '',
+      ),
+    ).toBe('https://in.linkedin.com/in/ahamasmikartik');
+  });
+
+  it('ignores non-profile /comm/ paths', () => {
+    // /comm/mynetwork/, /comm/messaging/, /comm/feed/ etc. are LinkedIn
+    // product deep links, not profiles. Must not false-match.
+    expect(
+      extractFirstProfileUrl(
+        'https://www.linkedin.com/comm/mynetwork/ and https://www.linkedin.com/comm/messaging/',
+        '',
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('normalizeProfileUrl', () => {
@@ -263,6 +319,23 @@ describe('normalizeProfileUrl', () => {
     expect(normalizeProfileUrl('https://linkedin.com/in/x')).toBe(
       'https://linkedin.com/in/x',
     );
+  });
+
+  it('strips the LinkedIn tracked-click /comm/ prefix', () => {
+    // Real-world shape from a 2026 LinkedIn email notification. The /comm/
+    // prefix is a click-tracking redirect; the canonical profile URL is the
+    // same person as `in.linkedin.com/in/ahamasmikartik`.
+    expect(
+      normalizeProfileUrl(
+        'https://in.linkedin.com/comm/in/ahamasmikartik',
+      ),
+    ).toBe('https://in.linkedin.com/in/ahamasmikartik');
+  });
+
+  it('strips /comm/ regardless of subdomain', () => {
+    expect(
+      normalizeProfileUrl('https://www.linkedin.com/comm/in/foo-bar'),
+    ).toBe('https://www.linkedin.com/in/foo-bar');
   });
 });
 
