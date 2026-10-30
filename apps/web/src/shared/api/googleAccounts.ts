@@ -48,9 +48,18 @@ export function startConnectUrl(role: GoogleAccountRole): string {
   return `/api/auth/google/start?role=${encodeURIComponent(role)}`;
 }
 
+/**
+ * How often the Configure page re-fetches the account list. 30s keeps the
+ * "polled Nm ago" badge honest without hammering the server — the poll
+ * itself runs every minute, so halving that cadence is enough resolution
+ * for a human to see freshness.
+ */
+const ACCOUNTS_REFETCH_INTERVAL_MS = 30_000;
+
 export function useGoogleAccounts(): UseQueryResult<GoogleAccountPublic[]> {
   return useQuery({
     queryKey: googleAccountKeys.all,
+    refetchInterval: ACCOUNTS_REFETCH_INTERVAL_MS,
     queryFn: async () => {
       const raw = await apiFetch<unknown>('/api/auth/google/accounts');
       return AccountsResponseSchema.parse(raw).accounts;
