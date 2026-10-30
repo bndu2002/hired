@@ -20,6 +20,27 @@ const discoverBody = z.object({
   channels: z.enum(['gmail', 'linkedin', 'both']),
 });
 
+/**
+ * One contact's channel ticks in the Run Agent modal. Zod enforces at least
+ * one channel ticked per row — a row with both false shouldn't be in the
+ * payload at all; the UI only ships rows the user actually selected.
+ */
+const selectionSchema = z
+  .object({
+    contactId: z.number().int().positive(),
+    gmail: z.boolean(),
+    linkedin: z.boolean(),
+  })
+  .refine((s) => s.gmail || s.linkedin, {
+    message: 'selection must have at least one channel set to true',
+  });
+
+const sendBody = z.object({
+  runId: z.number().int().positive(),
+  // Spec: 1-8 contacts per run (MAX_CONTACTS_PER_RUN). Allow up to 8 here.
+  selections: z.array(selectionSchema).min(1).max(8),
+});
+
 agentRouter.post('/discover', async (req, res, next) => {
   try {
     const parsed = discoverBody.safeParse(req.body);
@@ -75,6 +96,58 @@ agentRouter.post('/discover', async (req, res, next) => {
         const _exhaustive: never = result;
         void _exhaustive;
         logger.error({ result }, 'unhandled DiscoverResult status');
+        res.status(500).json({ error: 'internal_error' });
+        return;
+      }
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /api/agent/send ───────────────────────────────────────────────────
+
+agentRouter.post('/send', async (req, res, next) => {
+  try {
+    const parsed = sendBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'invalid_payload',
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+
+    const result = await orchestrator.runSendPhase(parsed.data);
+
+    switch (result.status) {
+      case 'ok':
+        res.json({
+          runId: result.runId,
+          linkedinConnectDrafted: result.linkedinConnectDrafted,
+          skipped: result.skipped,
+        });
+        return;
+
+      case 'run_not_found':
+        res.status(404).json({
+          error: 'run_not_found',
+          runId: result.runId,
+        });
+        return;
+
+      case 'invalid_selections':
+        res.status(400).json({
+          error: 'invalid_selections',
+          reason: result.reason,
+          offendingContactIds: result.offendingContactIds,
+        });
+        return;
+
+      default: {
+        const _exhaustive: never = result;
+        void _exhaustive;
+        logger.error({ result }, 'unhandled SendResult status');
         res.status(500).json({ error: 'internal_error' });
         return;
       }

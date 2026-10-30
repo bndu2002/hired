@@ -33,17 +33,23 @@ import {
   parseLinkedInNotification,
   type LinkedInNotification,
 } from '../core/linkedinNotificationParser.js';
+import { splitName } from '../core/nameSplit.js';
 import {
   canApplyGmailEvent,
   canApplyLinkedinEvent,
   nextGmailStatus,
   nextLinkedinStatus,
 } from '../core/stateMachines.js';
+import { render, UnresolvedTemplateVarsError } from '../core/templating.js';
 import * as contactRepo from '../db/repositories/contact.repo.js';
 import * as eventRepo from '../db/repositories/event.repo.js';
 import * as googleAccountRepo from '../db/repositories/googleAccount.repo.js';
+import * as jobRepo from '../db/repositories/job.repo.js';
+import * as runRepo from '../db/repositories/run.repo.js';
+import * as settingRepo from '../db/repositories/setting.repo.js';
 import { logger } from '../logger.js';
 import { buildGmailClient } from './gmail.js';
+import { SETTING_KEYS } from './settingsSeeder.js';
 
 // ─── telemetry types ────────────────────────────────────────────────────────
 
@@ -299,6 +305,25 @@ export interface ProcessMessageResult {
       | null;
     /** Human-readable reason when outcome is 'untracked'. */
     readonly skipReason: string | null;
+    /**
+     * Outcome of the auto-DM-draft side-effect that fires AFTER a successful
+     * `linkedin_acceptance_detected`. Null for every other code path (not a
+     * connect accept, or the accept didn't apply). When present:
+     *   - { status: 'drafted', ... } — DM template rendered + persisted,
+     *     contact.linkedin_status is now DM_DRAFTED (second transition).
+     *   - { status: 'skipped', skipReason: string } — accept landed but we
+     *     couldn't draft (missing template setting, template references
+     *     unknown variables, no job for the run, etc). Status stays
+     *     CONNECTED; the Queue UI can offer manual draft later.
+     */
+    readonly autoDmDraft:
+      | {
+          status: 'drafted';
+          renderedBody: string;
+          newLinkedinStatus: LinkedinStatus;
+        }
+      | { status: 'skipped'; skipReason: string }
+      | null;
   };
 }
 
@@ -357,6 +382,7 @@ export async function processMessage(
         role === 'sending' && !threadId
           ? 'not a LinkedIn notification and no thread id'
           : 'not a LinkedIn notification; no matching gmail thread',
+      autoDmDraft: null,
     },
   };
 }
@@ -389,6 +415,7 @@ async function handleLinkedInNotification(
         matchedContactName: null,
         statusChange: null,
         skipReason: 'no profile URL in message body — cannot correlate',
+        autoDmDraft: null,
       },
     };
   }
@@ -406,6 +433,7 @@ async function handleLinkedInNotification(
         matchedContactName: null,
         statusChange: null,
         skipReason: `no contact in DB with linkedin_url matching ${linkedinUrl}`,
+        autoDmDraft: null,
       },
     };
   }
@@ -443,6 +471,7 @@ async function handleLinkedInNotification(
         matchedContactName: contact.name,
         statusChange: null,
         skipReason: `event ${event.type} illegal from status ${contact.linkedinStatus}`,
+        autoDmDraft: null,
       },
     };
   }
@@ -468,12 +497,23 @@ async function handleLinkedInNotification(
         matchedContactName: contact.name,
         statusChange: null,
         skipReason: `already in status ${contact.linkedinStatus}; duplicate ${event.type} skipped`,
+        autoDmDraft: null,
       },
     };
   }
 
   await eventRepo.append(contact.id, event);
   await contactRepo.updateLinkedinStatus(contact.id, nextStatus);
+
+  // Side effect: when an accept lands and the contact just flipped to
+  // CONNECTED, render the DM template + persist. Non-fatal — if the setting
+  // is missing or the template fails to render, we log and leave the Queue
+  // UI to offer a manual draft. The acceptance event is already in the log.
+  let autoDmDraft: ProcessMessageResult['debug']['autoDmDraft'] = null;
+  if (parsed.kind === 'connect_accepted' && nextStatus === 'CONNECTED') {
+    autoDmDraft = await autoDraftDmForContact(contact);
+  }
+
   return {
     outcome: parsed.kind === 'connect_accepted' ? 'linkedin_accept' : 'linkedin_reply',
     debug: {
@@ -487,6 +527,7 @@ async function handleLinkedInNotification(
         to: nextStatus,
       },
       skipReason: null,
+      autoDmDraft,
     },
   };
 }
@@ -520,6 +561,7 @@ async function handleGmailThreadReply(
         matchedContactName: contact.name,
         statusChange: null,
         skipReason: `event ${event.type} illegal from gmail status ${contact.gmailStatus}`,
+        autoDmDraft: null,
       },
     };
   }
@@ -539,6 +581,7 @@ async function handleGmailThreadReply(
         matchedContactName: contact.name,
         statusChange: null,
         skipReason: `already in gmail status ${contact.gmailStatus}; duplicate reply_received skipped`,
+        autoDmDraft: null,
       },
     };
   }
@@ -558,7 +601,128 @@ async function handleGmailThreadReply(
         to: nextStatus,
       },
       skipReason: null,
+      autoDmDraft: null,
     },
+  };
+}
+
+// ─── auto DM draft on acceptance ────────────────────────────────────────────
+
+/**
+ * After a connection acceptance flips a contact to CONNECTED, render the DM
+ * template and persist it. Appends a `linkedin_dm_drafted` event with the
+ * rendered body and advances the state machine CONNECTED → DM_DRAFTED. The
+ * Queue UI shows the stored draft so Vandana can paste into LinkedIn's
+ * messaging compose box (D1 — no scripted LinkedIn).
+ *
+ * Non-fatal: any failure to look up the job, fetch the template, or render
+ * returns a `skipped` outcome and leaves the contact in CONNECTED. The user
+ * can draft manually from the Queue, and we log loudly enough that a
+ * misconfigured template is obvious.
+ */
+async function autoDraftDmForContact(
+  contact: contactRepo.Contact,
+): Promise<ProcessMessageResult['debug']['autoDmDraft']> {
+  // 1. Resolve the Job that owns this contact's Run — we need {companyName,
+  //    jobTitle} for template variables. The Run → Job hop is two queries;
+  //    acceptances are rare (a handful per day) so the chattiness is fine.
+  const run = await runRepo.getRunById(contact.runId);
+  if (!run) {
+    logger.warn(
+      { contactId: contact.id, runId: contact.runId },
+      'auto DM draft: run not found for contact — skipping',
+    );
+    return { status: 'skipped', skipReason: 'run_not_found' };
+  }
+  const job = await jobRepo.getJobById(run.jobId);
+  if (!job) {
+    logger.warn(
+      { contactId: contact.id, runId: run.id, jobId: run.jobId },
+      'auto DM draft: job not found for run — skipping',
+    );
+    return { status: 'skipped', skipReason: 'job_not_found' };
+  }
+
+  // 2. Pull the DM template + display name. If either is missing (settings
+  //    not seeded yet, user cleared the template), skip with a clear reason.
+  const [dmTemplate, displayName] = await Promise.all([
+    settingRepo.get(SETTING_KEYS.linkedinDmTemplate),
+    settingRepo.get(SETTING_KEYS.userDisplayName),
+  ]);
+  if (!dmTemplate || !dmTemplate.value.trim()) {
+    logger.warn(
+      { contactId: contact.id, key: SETTING_KEYS.linkedinDmTemplate },
+      'auto DM draft: template setting missing or empty — skipping',
+    );
+    return { status: 'skipped', skipReason: 'template_missing' };
+  }
+
+  // 3. Build the render context. firstName uses the same splitter the
+  //    discovery path uses so a one-name-only contact (no firstName derivable)
+  //    gracefully falls through to the "render error" branch via
+  //    UnresolvedTemplateVarsError if the template references firstName.
+  const { firstName } = splitName(contact.name);
+  const vars: Record<string, string> = {
+    jobTitle: job.jobTitle,
+    companyName: job.companyName,
+    myName: displayName?.value ?? 'me',
+  };
+  if (firstName) vars.firstName = firstName;
+
+  let renderedBody: string;
+  try {
+    renderedBody = render(dmTemplate.value, vars);
+  } catch (err) {
+    if (err instanceof UnresolvedTemplateVarsError) {
+      logger.warn(
+        {
+          contactId: contact.id,
+          missing: err.missing,
+          templateKey: SETTING_KEYS.linkedinDmTemplate,
+        },
+        'auto DM draft: template references unknown variables — skipping',
+      );
+      return {
+        status: 'skipped',
+        skipReason: `template_unresolved_vars: ${err.missing.join(',')}`,
+      };
+    }
+    throw err;
+  }
+
+  // 4. State machine: CONNECTED + linkedin_dm_drafted → DM_DRAFTED. If the
+  //    contact somehow isn't CONNECTED anymore (shouldn't happen — we only
+  //    call this right after flipping to CONNECTED), bail safely.
+  const dmEvent = makeEvent('linkedin_dm_drafted', { renderedBody });
+  if (!canApplyLinkedinEvent('CONNECTED', dmEvent)) {
+    logger.error(
+      { contactId: contact.id },
+      'auto DM draft: state machine rejected linkedin_dm_drafted from CONNECTED — unreachable',
+    );
+    return { status: 'skipped', skipReason: 'state_machine_rejected' };
+  }
+  const newStatus = nextLinkedinStatus('CONNECTED', dmEvent);
+
+  // 5. Persist: event + status cache + stored draft text. Three writes,
+  //    done sequentially (append-only semantics tolerate crash-mid: a replay
+  //    would still land on DM_DRAFTED).
+  await eventRepo.append(contact.id, dmEvent);
+  await contactRepo.updateLinkedinStatus(contact.id, newStatus);
+  await contactRepo.updateLinkedinDmDraft(contact.id, renderedBody);
+
+  logger.info(
+    {
+      contactId: contact.id,
+      runId: run.id,
+      renderedBodyLength: renderedBody.length,
+    },
+    'auto DM draft: rendered + persisted',
+  );
+
+  return {
+    status: 'drafted',
+    renderedBody,
+    newLinkedinStatus: newStatus,
   };
 }
 

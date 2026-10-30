@@ -27,11 +27,14 @@ import { authPublicRouter, authProtectedRouter } from './routes/auth.routes.js';
 import { devRouter } from './routes/dev.routes.js';
 import { discoveryTestRouter } from './routes/discoveryTest.routes.js';
 import { jobsRouter } from './routes/jobs.routes.js';
+import { linkedinQueueRouter } from './routes/linkedinQueue.routes.js';
+import { settingsRouter } from './routes/settings.routes.js';
 import {
   discoveryRegistry,
   emailFinderRegistry,
   emailVerifierRegistry,
 } from './services/providerRegistry.js';
+import { seedDefaultSettings } from './services/settingsSeeder.js';
 
 // Register adapters once at module load. Keeping this at module scope (not
 // inside createApp) means a single registration applies across tests + prod,
@@ -131,6 +134,8 @@ export function createApp(): express.Express {
 
   app.use('/api/jobs', jobsRouter);
   app.use('/api/agent', agentRouter);
+  app.use('/api/settings', settingsRouter);
+  app.use('/api/linkedin-queue', linkedinQueueRouter);
   // Protected OAuth endpoints (list/disconnect) — normal dashboard XHR.
   app.use('/api/auth', authProtectedRouter);
   // R&D only — compare OpenAI vs Gemini discovery adapters side-by-side.
@@ -154,6 +159,13 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
       { port: config.PORT, env: config.NODE_ENV },
       'hired server booted',
     );
+    // Seed default settings idempotently. First boot populates the LinkedIn
+    // templates + user display name; subsequent boots no-op. Failures are
+    // logged but non-fatal — the HTTP surface is already live, and Vandana
+    // can PUT /api/settings/:key directly if seeding ever breaks.
+    seedDefaultSettings().catch((err) => {
+      logger.error({ err }, 'settings seeder failed');
+    });
     // Start the inbound poll AFTER the HTTP server is listening so the
     // process is observably alive before background traffic starts. The
     // cron is a no-op when no Gmail accounts are connected yet.
