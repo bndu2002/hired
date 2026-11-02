@@ -7,16 +7,15 @@
  * once Vandana edits a template through the Configure UI, re-boots won't
  * stomp her changes.
  *
- * Defaults are chosen to be:
- *   - short (connect requests have a 300-char cap on LinkedIn)
- *   - specific (reference the actual job the orchestrator is targeting)
- *   - honest (D7 — no "big-fan" openers)
+ * Template variables (requirements.md § 4.6 is authoritative):
+ *   - {{outreachEmployeeName}}  — the contact's first name (from splitName)
+ *   - {{jobTitle}}              — from Job.jobTitle
+ *   - {{companyName}}           — from Job.companyName
+ *   - {{jobLink}}               — from Job.jobUrl (LinkedIn posting URL)
  *
- * Variables used (all MUST be supplied by the orchestrator's render context):
- *   - firstName         (split from Contact.name)
- *   - jobTitle          (from Job)
- *   - companyName       (from Job)
- *   - myName            (from `user.display_name` setting below)
+ * There is no {{myName}} / {{yourName}} variable. The user's signature is
+ * literal text in the template body — if Vandana changes her name she edits
+ * the template, same as any other authored copy.
  */
 
 import { logger } from '../logger.js';
@@ -24,32 +23,39 @@ import * as settingRepo from '../db/repositories/setting.repo.js';
 
 // ─── default values ─────────────────────────────────────────────────────────
 
+/**
+ * ⚠ FLOW B INVARIANT ⚠
+ *
+ * This template is SEEDED into app_settings but intentionally NOT RENDERED
+ * anywhere in the current pipeline. `orchestrator.runSendPhase` emits
+ * `linkedin_connect_drafted` with an empty payload — LinkedIn connect
+ * requests under Flow B (design.md § 11, D1-adjacent) are BARE, no custom
+ * note. The user clicks LinkedIn's default Connect flow with no "Add a note"
+ * text.
+ *
+ * The row exists so a future Configure Templates UI (Phase 4.3) can expose
+ * it as a user-editable text alongside the DM template — but any code that
+ * READS this value to render it on connect would silently violate Flow B.
+ * If you need custom connect notes, that's a new design decision requiring
+ * a spec update, not just a code wire-up.
+ */
 const DEFAULT_LINKEDIN_CONNECT_TEMPLATE =
-  "Hi {{firstName}}, I'm applying for the {{jobTitle}} role at {{companyName}} and noticed your work there. Would love to connect to learn more about the team.";
+  "Hi {{outreachEmployeeName}}, I'm applying for the {{jobTitle}} role at {{companyName}} ({{jobLink}}) and noticed your work there. Would love to connect to learn more about the team.";
 
-const DEFAULT_LINKEDIN_DM_TEMPLATE = `Hi {{firstName}},
+const DEFAULT_LINKEDIN_DM_TEMPLATE = `Hi {{outreachEmployeeName}},
 
-Thanks for connecting. I'm applying for the {{jobTitle}} role at {{companyName}} — would you be open to a referral if my profile looks like a fit?
+Thanks for connecting. I'm applying for the {{jobTitle}} role at {{companyName}} ({{jobLink}}) — would you be open to a referral if my profile looks like a fit?
 
 Happy to share my resume and a short pitch of where I'd add value.
 
 Best,
-{{myName}}`;
-
-/**
- * Display name used in template signatures. Can be edited from Configure.
- * Defaulting to the user's name rather than a placeholder so a connect
- * request made before the user visits Configure doesn't ship with
- * "{{myName}}" literally in it.
- */
-const DEFAULT_USER_DISPLAY_NAME = 'Vandana';
+Vandana`;
 
 // ─── known keys (export for use elsewhere) ──────────────────────────────────
 
 export const SETTING_KEYS = {
   linkedinConnectTemplate: 'linkedin.connect_template',
   linkedinDmTemplate: 'linkedin.dm_template',
-  userDisplayName: 'user.display_name',
 } as const;
 
 // ─── seeder ─────────────────────────────────────────────────────────────────
@@ -68,10 +74,6 @@ export async function seedDefaultSettings(): Promise<void> {
     {
       key: SETTING_KEYS.linkedinDmTemplate,
       value: DEFAULT_LINKEDIN_DM_TEMPLATE,
-    },
-    {
-      key: SETTING_KEYS.userDisplayName,
-      value: DEFAULT_USER_DISPLAY_NAME,
     },
   ];
 

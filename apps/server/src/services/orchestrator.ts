@@ -32,7 +32,10 @@ import type {
 import { companyNameToDomain } from '../core/companyDomain.js';
 import { splitName } from '../core/nameSplit.js';
 import type { Contact } from '../db/repositories/contact.repo.js';
-import { emailFinderRegistry } from './providerRegistry.js';
+import {
+  emailFinderRegistry,
+  emailVerifierRegistry,
+} from './providerRegistry.js';
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
@@ -464,9 +467,15 @@ export async function runSendPhase(input: SendInput): Promise<SendResult> {
  *   3. emailFinderRegistry.resolve() — iterates finders in order; first
  *      non-null wins. SnovFinder (if registered) is primary;
  *      PatternHeuristicFinder is the always-registered fallback.
- *   4. Log events (email_find_attempted, email_found | email_not_found) and
- *      the verification outcome (email_verified | email_unverifiable).
- *   5. UPDATE the contact row with the resolved email + flags.
+ *   4. emailVerifierRegistry.resolve() on the found address — Reoon (today)
+ *      says valid / invalid / accept_all / unknown. D2 (verified-only send)
+ *      means only `valid` unlocks Gmail dispatch; the other three are
+ *      recorded as `email_unverifiable` so the Gmail-send branch refuses.
+ *      This call is UNCONDITIONAL on which finder won — finder confidence
+ *      is a hint, the verifier is authoritative.
+ *   5. Log events (email_find_attempted, email_found | email_not_found,
+ *      email_verified | email_unverifiable).
+ *   6. UPDATE the contact row with the resolved email + flags.
  *
  * Error handling: adapter failures are expected; the registry logs them and
  * returns null. Everything that gets to this function is non-fatal — we never
@@ -530,35 +539,78 @@ async function resolveEmailForContact(
     }),
   );
 
-  // D2 — the finder either used our verifier (PatternHeuristicFinder) or
-  // its own (Snov). High + medium confidence are both backed by a verifier
-  // saying "this is a real address or at least a reachable domain". Low
-  // confidence means the finder couldn't confirm — treat as unverified.
-  const emailVerified = resolved.result.confidence !== 'low';
+  // D2 — ALWAYS run the found address through the verifier registry,
+  // regardless of which finder won. Finder confidence is a hint; the
+  // verifier is the authority. design.md § 9 is explicit: the orchestrator
+  // calls emailVerifierRegistry.resolve() after the finder resolves. Only
+  // a 'valid' status unlocks Gmail dispatch; 'accept_all' and 'unknown' are
+  // treated as unverified and fall back to LinkedIn; 'invalid' is dropped
+  // from Gmail eligibility.
+  //
+  // Previously this block used `resolved.result.confidence !== 'low'` as a
+  // proxy, which silently bypassed the verifier whenever Snov (or any finder
+  // that doesn't call Reoon internally) won — weakening D2 without a trace.
+  // Fixed to the spec's intended behavior.
+  const verifyResolved = await emailVerifierRegistry.resolve((v) =>
+    v.verify(resolved.result.email),
+  );
+
+  if (!verifyResolved) {
+    // Every verifier adapter failed or is exhausted. The email we found
+    // stays on the row for human review, but we must not mark it verified.
+    logger.warn(
+      { contactId: contact.id, email: resolved.result.email },
+      'email verifier registry: all adapters failed; email stored but unverified',
+    );
+    await contactRepo.updateEmailInfo({
+      contactId: contact.id,
+      email: resolved.result.email,
+      emailVerified: false,
+      emailFoundVia: resolved.via,
+      emailVerifiedVia: null,
+    });
+    await eventRepo.append(
+      contact.id,
+      makeEvent('email_unverifiable', {
+        verifiedVia: 'none',
+        status: 'unknown',
+        reason: 'all verifier adapters failed or exhausted',
+      }),
+    );
+    return;
+  }
+
+  const verifierStatus = verifyResolved.result.status;
+  const emailVerified = verifierStatus === 'valid';
 
   await contactRepo.updateEmailInfo({
     contactId: contact.id,
     email: resolved.result.email,
     emailVerified,
     emailFoundVia: resolved.via,
-    emailVerifiedVia: emailVerified ? resolved.via : null,
+    emailVerifiedVia: verifyResolved.via,
   });
 
   if (emailVerified) {
     await eventRepo.append(
       contact.id,
       makeEvent('email_verified', {
-        verifiedVia: resolved.via,
+        verifiedVia: verifyResolved.via,
         status: 'valid',
       }),
     );
   } else {
+    // 'invalid' | 'accept_all' | 'unknown' — all three mean "don't send
+    // via Gmail". Keep the status in the payload so a reviewer can tell
+    // *why* at a glance.
     await eventRepo.append(
       contact.id,
       makeEvent('email_unverifiable', {
-        verifiedVia: resolved.via,
-        status: 'unknown',
-        reason: `low confidence (${resolved.result.confidence})`,
+        verifiedVia: verifyResolved.via,
+        status: verifierStatus,
+        reason:
+          verifyResolved.result.reason ??
+          `verifier returned ${verifierStatus}`,
       }),
     );
   }

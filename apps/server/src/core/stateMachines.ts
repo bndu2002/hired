@@ -133,6 +133,29 @@ export function projectLinkedinStatus(
 }
 
 // ─── Gmail state machine ────────────────────────────────────────────────────
+//
+// TODO(phase-4.4) — Gmail dispatch gaps per drift audit M5:
+//
+//   1. `gmail_bounced` currently only legal from SENT. The spec's intent
+//      (requirements.md § 4-ish + design.md § 10) is that a bounce event
+//      is possible from any post-send state, including an edge where the
+//      SMTP response fires back faster than we flip the cache to SENT.
+//      Open question: do we need QUEUED → BOUNCED, or do we guarantee the
+//      cache flip happens first? Decide when wiring Phase 4.4 send.
+//
+//   2. No `gmail_failed` event or FAILED gmail status exists yet. When
+//      Gmail dispatch lands and the Gmail API returns a non-bounce error
+//      (quota, auth revoked, 5xx), we need:
+//        - a new event type in @hired/types: `gmail_failed: { reason }`
+//        - a new terminal status 'FAILED' (or reuse something) in GmailStatus
+//        - a transition rule here: QUEUED | SENT → FAILED on gmail_failed
+//      Design doc expects this; code doesn't model it; shipping Phase 4.4
+//      without closing this gap would crash the orchestrator on the first
+//      non-success Gmail response.
+//
+// Both items are blockers for Phase 4.4 ("Gmail send"), not for the current
+// LinkedIn-only path. Flagged here so a reader of this file notices before
+// they wire the Gmail orchestrator.
 
 const GMAIL_TRANSITIONS: Readonly<
   Record<
