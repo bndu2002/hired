@@ -105,3 +105,67 @@ export function useDiscover(): UseMutationResult<DiscoverResponse, ApiError, Dis
     },
   });
 }
+
+// ─── send (Phase B) ─────────────────────────────────────────────────────────
+
+const SendSkipReasonSchema = z.enum([
+  'no_linkedin_url',
+  'linkedin_illegal_state',
+  'linkedin_already_drafted',
+  'gmail_not_supported_yet',
+]);
+
+const SendSkipSchema = z.object({
+  contactId: z.number(),
+  reason: SendSkipReasonSchema,
+  currentLinkedinStatus: LinkedinStatusSchema.optional(),
+});
+
+const SendResponseSchema = z.object({
+  runId: z.number().int().positive(),
+  linkedinConnectDrafted: z.number().int().nonnegative(),
+  skipped: z.array(SendSkipSchema),
+});
+
+export type SendSkipReason = z.infer<typeof SendSkipReasonSchema>;
+export type SendSkip = z.infer<typeof SendSkipSchema>;
+export type SendResponse = z.infer<typeof SendResponseSchema>;
+
+export interface SendSelection {
+  readonly contactId: number;
+  readonly gmail: boolean;
+  readonly linkedin: boolean;
+}
+
+export interface SendInput {
+  readonly runId: number;
+  readonly selections: readonly SendSelection[];
+}
+
+/**
+ * Commit the user's modal selections.
+ *
+ * The server handles LinkedIn selections (writes `linkedin_connect_drafted`,
+ * flips status to CONNECT_DRAFTED, which makes the contact appear in the
+ * LinkedIn Queue). Gmail selections are recorded as `contact_selected` but
+ * surface in `skipped[]` with `gmail_not_supported_yet` until Phase 4.4 lands.
+ *
+ * Invalidate linkedin-queue after success so the Queue page shows the new
+ * drafts if the user navigates there.
+ */
+export function useSend(): UseMutationResult<SendResponse, ApiError, SendInput> {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: SendInput) => {
+      const raw = await apiFetch<unknown>('/api/agent/send', {
+        method: 'POST',
+        body: input,
+      });
+      return SendResponseSchema.parse(raw);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['linkedin-queue'] });
+    },
+  });
+}

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
+  ArrowRight,
   Building2,
+  Check,
   Loader2,
   AlertCircle,
   Zap,
@@ -11,8 +13,12 @@ import {
 } from 'lucide-react';
 
 import { useJob } from '../../shared/api/jobs.js';
-import type { Channels, DiscoveredContactView } from '../../shared/api/agent.js';
-import { useDiscover } from '../../shared/api/agent.js';
+import type {
+  Channels,
+  DiscoveredContactView,
+  SendResponse,
+} from '../../shared/api/agent.js';
+import { useDiscover, useSend } from '../../shared/api/agent.js';
 import { ApiError } from '../../shared/api/client.js';
 import { Button } from '../../shared/components/Button.js';
 import { ChannelPicker } from './ChannelPicker.js';
@@ -27,11 +33,21 @@ import { ContactList } from './ContactList.js';
  *   3. POST /api/agent/discover fires. Server runs Phase A (discovery +
  *      email resolution).
  *   4. Contacts render in a table. User reviews, (de)selects rows.
- *   5. "Send" is disabled — Phase B (dispatch) lands in a later slice.
+ *   5. Hit Send — POST /api/agent/send writes `linkedin_connect_drafted`
+ *      events for each LinkedIn-selected contact (Flow B, bare connect)
+ *      and flips their status to CONNECT_DRAFTED. They show up in the
+ *      LinkedIn Queue immediately. Gmail-selected contacts record intent
+ *      but surface in `skipped[]` with `gmail_not_supported_yet` until
+ *      Phase 4.4 (Gmail dispatch) lands.
  *
  * Why not auto-discover on page load:
  *   Each discovery burns one of 4 daily runs (D6). A browser refresh would
  *   spend a slot silently. User must opt in with the Discover click.
+ *
+ * Known UI simplification (v1): the global channel picker applies to ALL
+ * selected contacts uniformly. requirements.md § 4 "Running the agent" asks
+ * for PER-CONTACT channel toggles — that's an interaction upgrade for a
+ * later slice (would need columns of toggles per row in ContactList).
  */
 export function RunPage() {
   const { jobId: jobIdParam } = useParams<{ jobId: string }>();
@@ -40,6 +56,7 @@ export function RunPage() {
 
   const jobQuery = useJob(jobIdValid ? jobId : undefined);
   const discover = useDiscover();
+  const send = useSend();
 
   const [channels, setChannels] = useState<Channels>('both');
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(new Set());
@@ -196,17 +213,64 @@ export function RunPage() {
                 }}
               />
 
+              {send.isError && <SendErrorAlert error={send.error} />}
+              {send.isSuccess && <SendSuccessBanner result={send.data} />}
+
               <div className="mt-6 flex items-center justify-between">
                 <div className="text-sm text-slate-500">
                   {selectedIds.size} of {contacts.length} selected
                 </div>
                 <Button
                   variant="primary"
-                  disabled
-                  leading={<Send className="h-4 w-4" aria-hidden="true" />}
-                  title="Dispatch is Phase 4 (Gmail OAuth + send + LinkedIn Queue)."
+                  disabled={
+                    selectedIds.size === 0 ||
+                    send.isPending ||
+                    send.isSuccess
+                  }
+                  leading={
+                    send.isPending ? (
+                      <Loader2
+                        className="h-4 w-4 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : send.isSuccess ? (
+                      <Check className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <Send className="h-4 w-4" aria-hidden="true" />
+                    )
+                  }
+                  title={
+                    selectedIds.size === 0
+                      ? 'Select at least one contact first.'
+                      : send.isSuccess
+                        ? 'Already sent — selections are now in the LinkedIn Queue.'
+                        : 'Writes linkedin_connect_drafted events for LinkedIn-selected contacts. Flow B: no custom note.'
+                  }
+                  onClick={() => {
+                    if (!discover.data) return;
+                    // Fan the modal's global channel setting out to each
+                    // selected contact. Per-contact channel toggles would be
+                    // a UI upgrade; v1 keeps all selections on the same
+                    // channels. The server treats this correctly either way.
+                    const gmail =
+                      channels === 'gmail' || channels === 'both';
+                    const linkedin =
+                      channels === 'linkedin' || channels === 'both';
+                    send.mutate({
+                      runId: discover.data.runId,
+                      selections: Array.from(selectedIds).map((contactId) => ({
+                        contactId,
+                        gmail,
+                        linkedin,
+                      })),
+                    });
+                  }}
                 >
-                  Send ({selectedIds.size}) — coming in Phase 4
+                  {send.isPending
+                    ? 'Sending…'
+                    : send.isSuccess
+                      ? 'Sent'
+                      : `Send (${selectedIds.size})`}
                 </Button>
               </div>
             </>
@@ -307,5 +371,124 @@ function DiscoverErrorAlert({ error }: { error: unknown }) {
     <AlertCard tone="error" title={`Discovery failed (${error.status})`}>
       {body?.message ?? error.message}
     </AlertCard>
+  );
+}
+
+// ─── send-phase feedback ────────────────────────────────────────────────────
+
+/**
+ * Success banner after Send lands. Celebrates the LinkedIn drafts that
+ * queued, explains the Gmail-skipped lines honestly (the server's
+ * `skipped[]` surfaces reasons like `gmail_not_supported_yet` so the user
+ * knows what did and didn't happen), and offers a direct link to the Queue.
+ */
+function SendSuccessBanner({ result }: { readonly result: SendResponse }) {
+  const gmailDeferred = result.skipped.filter(
+    (s) => s.reason === 'gmail_not_supported_yet',
+  ).length;
+  const otherSkips = result.skipped.filter(
+    (s) => s.reason !== 'gmail_not_supported_yet',
+  );
+  return (
+    <div className="mt-6 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+      <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+      <div className="flex-1">
+        <div className="font-medium">
+          {result.linkedinConnectDrafted} connect request
+          {result.linkedinConnectDrafted === 1 ? '' : 's'} drafted
+        </div>
+        <ul className="mt-1 space-y-0.5 text-xs text-emerald-800">
+          {gmailDeferred > 0 && (
+            <li>
+              {gmailDeferred} Gmail selection{gmailDeferred === 1 ? '' : 's'}{' '}
+              recorded but not sent — Gmail dispatch ships in Phase 4.4.
+            </li>
+          )}
+          {otherSkips.map((skip) => (
+            <li key={`${skip.contactId}:${skip.reason}`}>
+              Contact #{skip.contactId}: {skip.reason.replaceAll('_', ' ')}
+              {skip.currentLinkedinStatus
+                ? ` (status: ${skip.currentLinkedinStatus})`
+                : ''}
+            </li>
+          ))}
+        </ul>
+        <Link
+          to="/linkedin-queue"
+          className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-emerald-900 underline-offset-2 hover:underline"
+        >
+          Go to LinkedIn Queue
+          <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Error banner for the Send mutation. Mirrors the discover error layout —
+ * narrows on ApiError to surface server-returned structured reasons when
+ * present (400 invalid_selections, 404 run_not_found).
+ */
+function SendErrorAlert({ error }: { readonly error: unknown }) {
+  if (!(error instanceof ApiError)) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return (
+      <div className="mt-6">
+        <AlertCard tone="error" title="Send failed">
+          {message}
+        </AlertCard>
+      </div>
+    );
+  }
+
+  const body = error.body as
+    | {
+        error?: string;
+        reason?: string;
+        offendingContactIds?: readonly number[];
+        runId?: number;
+      }
+    | null
+    | undefined;
+
+  if (error.status === 404) {
+    return (
+      <div className="mt-6">
+        <AlertCard tone="error" title="Run not found">
+          The server doesn't recognize this run id anymore
+          {body?.runId ? ` (${body.runId})` : ''}. Re-run discovery.
+        </AlertCard>
+      </div>
+    );
+  }
+  if (error.status === 400) {
+    return (
+      <div className="mt-6">
+        <AlertCard tone="error" title="Couldn't send">
+          <div>
+            {body?.reason === 'empty_selections' &&
+              'No contacts were selected.'}
+            {body?.reason === 'nothing_to_do' &&
+              'No channel was ticked for any selection.'}
+            {body?.reason === 'contact_not_in_run' && (
+              <>
+                Selections reference contacts that don't belong to this run:{' '}
+                {body.offendingContactIds?.join(', ')}. Refresh the page.
+              </>
+            )}
+            {!body?.reason && (body?.error ?? error.message)}
+          </div>
+        </AlertCard>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-6">
+      <AlertCard tone="error" title={`Send failed (${error.status})`}>
+        {body?.error ?? error.message}
+      </AlertCard>
+    </div>
   );
 }
