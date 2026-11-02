@@ -350,7 +350,44 @@ CREATE TABLE provider_credits (
     last_reset          DATE DEFAULT date_trunc('month', now())::DATE,
     last_call_at        TIMESTAMPTZ
 );
+
+-- Google accounts connected via OAuth (migration 0004). Multi-role so one
+-- install can connect both a 'linkedin_notifications' inbox (read-only, polls
+-- LinkedIn's accept/reply emails) and a 'sending' inbox (sends referral
+-- emails + reads own replies). Tokens are AES-256-GCM encrypted BY THE APP
+-- before insert using TOKEN_ENCRYPTION_KEY from .env — the DB only ever
+-- stores ciphertext.
+CREATE TABLE google_accounts (
+    id                   SERIAL PRIMARY KEY,
+    email                VARCHAR(255) NOT NULL,
+    role                 VARCHAR(32)  NOT NULL,   -- 'linkedin_notifications' | 'sending'
+    access_token_enc     TEXT         NOT NULL,
+    refresh_token_enc    TEXT         NOT NULL,
+    token_expiry         TIMESTAMPTZ,
+    scopes               TEXT,
+    gmail_history_id     VARCHAR(64),             -- incremental poll watermark
+    connected_at         TIMESTAMPTZ DEFAULT now(),
+    last_polled_at       TIMESTAMPTZ,
+    UNIQUE (email, role)
+);
+CREATE INDEX idx_google_accounts_role ON google_accounts(role);
+
+-- Application settings — generic KV (migration 0005). Hosts the LinkedIn
+-- templates and future user prefs. Hierarchical keys by convention
+-- (`linkedin.connect_template`, `linkedin.dm_template`); schema doesn't
+-- enforce the dot structure.
+CREATE TABLE app_settings (
+    key         TEXT         PRIMARY KEY,
+    value       TEXT         NOT NULL,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
 ```
+
+**Changed from spec (as-built audit, Oct 2026):**
+
+- `jobs` table has four additional columns the DDL above previously omitted (migration 0002 adds them, required by `requirements.md § 7` for Alt+H capture): `happy_job_id`, `experience_range`, `location_hint`, `posted_hint`. The authoritative current shape lives in `apps/server/src/db/schema.sql`.
+- `google_accounts` table + role model is new vs. the original spec's single-account `oauth_tokens` design. Rationale: user has one Gmail attached to LinkedIn and a separate one for sending, both need to be connected (see § 10 "Changed from spec" below).
+- `app_settings` is new vs. the original design — no "settings" table was spec'd. Added when LinkedIn templates needed somewhere to live (Phase 5.1); generic KV so future prefs (user display name, Gmail subject template, etc.) don't each need their own migration.
 
 ### Event types
 
@@ -489,6 +526,11 @@ export interface EmailVerifier {
 
 That's the whole lift. No change to the orchestrator or any downstream code.
 
+**Changed from spec (as-built audit, Oct 2026):**
+
+- **Discovery is India-only in v1.** Both `SerpApiXRaySource` and `OpenAiDiscoverySource` hardcode country=India (SerpAPI `restrictToCountry: 'IN'`, OpenAI `country: 'India'`). The adapter interface itself takes no country; it's a construction-time constraint. Per-job configurability (reading `job.location_hint`) is a v2 target.
+- **OpenAI web_search is registered as PRIMARY discovery adapter, SerpAPI as fallback.** The R&D slice (`feat/discovery-llm-rd`, merged as #10) found SerpAPI's X-ray recall decayed to near-zero for larger consultancies; OpenAI's web_search tool (Bing-backed) reliably returns real profiles across small and large companies. **Cost impact: ~\$5/mo in OpenAI usage**, which breaks `requirements.md § 3` "$0 build cost". The deviation was accepted explicitly during R&D; `requirements.md` success-criteria table should be amended to read "$0 except ~\$5/mo OpenAI" once we touch it.
+
 ---
 
 ## 8. Provider registry + fallback chain
@@ -607,6 +649,19 @@ For both Gmail and LinkedIn replies:
   - If `threadId` matches a tracked contact → reply path.
 - Rate limiting: Gmail API has generous quotas; no throttling needed at 16/day.
 
+**Changed from spec (as-built audit, Oct 2026):**
+
+- **Multi-account, role-tagged.** The original spec described one Gmail connection. As-built supports two roles stored in `google_accounts.role`:
+  - `linkedin_notifications` — the Gmail attached to the user's LinkedIn account; polled read-only for "X accepted your invitation" emails and future LinkedIn reply notifications.
+  - `sending` — the Gmail used to send referral emails (when Phase 4.4 Gmail dispatch lands) and polled for replies on tracked threads.
+  Rationale: user's real-world setup separates these two inboxes. Trying to force both into one account would require either forwarding filters (fragile) or giving up tracking on half the flow.
+- **Inbound poll interval is 60s, not 15 min.** Deliberate temporary tightening for first-week validation — faster feedback when manually testing acceptance detection. `apps/server/src/jobs/inboundPoll.cron.ts` schedules `* * * * *`. Revisit back toward 5-15 min once the flow is proven in production use. (The 16-sends-per-day quota argument from spec still holds — poll cadence is unrelated to send volume.)
+- **Watermark-based incremental fetch, not UNREAD scan.** The poller uses `users.history.list` with `startHistoryId` + `historyTypes:['messageAdded']` + `labelIds:['INBOX']`. First poll per account calls `users.getProfile` to baseline the historyId (no backlog scan). History-expired (404) auto-rebaselines. This is a strict improvement over UNREAD scanning:
+  - UNREAD scan would mark the user's actual LinkedIn emails as read, polluting their inbox state.
+  - UNREAD scan has no built-in deduplication; the user could manually mark something unread and we'd re-process.
+  - History cursor is bounded (Gmail retains ~7 days); auto-rebaseline covers the drift case.
+- **Tokens are AES-256-GCM encrypted BY THE APP** (`core/crypto.ts` using `node:crypto`), not column-encrypted via `pgcrypto`. Rationale: pgcrypto requires the key in SQL/logs; app-side encryption keeps the key in-process (`.env` → `config.TOKEN_ENCRYPTION_KEY`). The DB only ever stores ciphertext. See § 16 for the full security story.
+
 ---
 
 ## 11. LinkedIn integration (Flow B)
@@ -619,6 +674,12 @@ Zero scripted clicks on LinkedIn. The content script's job is purely:
 4. **Detect DM send** — observe the message appearing in the thread; POST `linkedin_dm_sent`.
 
 Acceptance detection goes through Gmail (§10), not through LinkedIn.
+
+**Flow B invariant: connect requests are BARE.** `orchestrator.runSendPhase` writes `linkedin_connect_drafted` with an empty payload — no template is rendered on the connect leg. The template-based pitch is reserved for the DM AFTER the person accepts. This is intentional and matches Happy Agent's observed behavior.
+
+**Changed from spec (as-built audit, Oct 2026):**
+
+- `settingsSeeder.ts` populates a `linkedin.connect_template` row in `app_settings` even though NOTHING reads it today. The template exists for a possible future "custom note on connect" option that would require a spec change. The seeder file contains a prominent `⚠ FLOW B INVARIANT ⚠` comment next to the seed so a future dev doesn't accidentally wire this value to a render call and silently violate Flow B. If you reach for this value in code: stop, revisit this section, update the spec.
 
 ---
 
@@ -720,9 +781,13 @@ Target coverage: 80%+ on `core/`, 60%+ on `adapters/` and `services/`, zero targ
 
 - Server binds `127.0.0.1` only, never `0.0.0.0`.
 - All `/api/*` routes require `X-Hired-Secret: <token>` header. Token is in `.env`, generated once (`openssl rand -hex 32`). Extension stores it in `chrome.storage.local`.
-- Gmail OAuth tokens stored in Postgres `oauth_tokens` table, column-encrypted via `pgcrypto` with a key derived from `.env`.
+- Gmail OAuth tokens stored in Postgres `google_accounts` table (role-tagged per § 10), AES-256-GCM encrypted BY THE APP using `TOKEN_ENCRYPTION_KEY` from `.env` and `core/crypto.ts` (`node:crypto`). Keys never enter SQL or logs; the DB only sees ciphertext.
 - `.env` is `.gitignore`d. `.env.example` lists required vars with placeholder values.
-- No telemetry phones home. The only outbound HTTPS is to Gmail, Gemini, SerpAPI, Snov, Reoon.
+- No telemetry phones home. The only outbound HTTPS is to Gmail, Gemini, SerpAPI, Snov, Reoon, and OpenAI.
+
+**Changed from spec (as-built audit, Oct 2026):**
+
+- Token storage moved from `oauth_tokens` (spec) with `pgcrypto` column encryption to `google_accounts` (as-built, role-tagged) with app-side AES-256-GCM encryption. Rationale: `pgcrypto` requires passing the key as a SQL parameter on every read, which puts it in query logs and risks exposure during psql sessions. App-side encryption keeps the key in a single process boundary and the DB holds nothing but ciphertext.
 
 ---
 
@@ -742,27 +807,43 @@ Target coverage: 80%+ on `core/`, 60%+ on `adapters/` and `services/`, zero targ
 ### A. HTTP routes (full list)
 
 ```
+# Public (no shared-secret gate — browser navigation / monitoring)
+GET    /api/health                    for monitoring
+GET    /api/auth/google/start         OAuth consent redirect (role=linkedin_notifications|sending)
+GET    /api/auth/google/callback      OAuth token exchange
+
+# Shared-secret gated below
+
 POST   /api/jobs/run-via-hired        extension → server; one scraped job (D10). Upserts by job_url.
 GET    /api/jobs                      list recent jobs (dashboard)
 GET    /api/jobs/:id                  single job detail
 
-POST   /api/agent/discover            start a run (opens modal)   returns { runId, contacts }
-POST   /api/agent/send                confirm selections, dispatch
+POST   /api/agent/discover            Phase A — start a run; returns { runId, contacts, discoveredVia }
+POST   /api/agent/send                Phase B — confirm selections; LinkedIn drafts into queue (Gmail dispatch is Phase 4.4)
 
-GET    /api/contacts                  filtered by run / status
-GET    /api/contacts/:id              with full event history
-PATCH  /api/contacts/:id              manual overrides (sentiment correction, etc.)
+GET    /api/auth/google/accounts      list connected accounts
+DELETE /api/auth/google/accounts/:id  disconnect one
 
-GET    /api/linkedin-queue            { connectQueue: [...], dmQueue: [...] }
-POST   /api/linkedin-queue/mark-sent  { contactId, kind: 'connect' | 'dm' }
+GET    /api/settings                  list all app_settings rows
+GET    /api/settings/:key             one setting (404 on missing)
+PUT    /api/settings/:key             upsert
 
-GET    /api/activity                  My Activity table
-PATCH  /api/activity/:runId           { markedAsInterview?: boolean }
+GET    /api/linkedin-queue            { connect: [...], dm: [...] } with job context + draft (DM)
+POST   /api/linkedin-queue/mark-sent  { contactId, kind: 'connect' | 'dm' }; 202 ok | 404 missing | 409 already_sent | 409 illegal_state
 
-GET    /api/provider-credits          telemetry for sidebar card
-
-GET    /api/health                    for monitoring
+# Not yet built (Phase 4.7 and 6):
+# GET    /api/contacts                 filtered by run / status
+# GET    /api/contacts/:id             with full event history
+# PATCH  /api/contacts/:id             manual overrides
+# GET    /api/activity                 My Activity table
+# PATCH  /api/activity/:runId          { markedAsInterview?: boolean }
+# GET    /api/provider-credits         telemetry for sidebar card
 ```
+
+**Changed from spec (as-built audit, Oct 2026):**
+
+- `/api/linkedin-queue` response shape: spec had `{ connectQueue, dmQueue }`, as-built uses `{ connect, dm }` (shorter, same meaning). UI and Zod schemas in `apps/web/src/shared/api/linkedinQueue.ts` match.
+- `/api/auth/google/*` and `/api/settings/*` are new vs. the original appendix listing — added when Phases 4.1 and 5.1 landed.
 
 ### B. Key environment variables (`.env.example`)
 

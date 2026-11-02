@@ -643,12 +643,9 @@ async function autoDraftDmForContact(
     return { status: 'skipped', skipReason: 'job_not_found' };
   }
 
-  // 2. Pull the DM template + display name. If either is missing (settings
-  //    not seeded yet, user cleared the template), skip with a clear reason.
-  const [dmTemplate, displayName] = await Promise.all([
-    settingRepo.get(SETTING_KEYS.linkedinDmTemplate),
-    settingRepo.get(SETTING_KEYS.userDisplayName),
-  ]);
+  // 2. Pull the DM template. If missing (settings not seeded yet, user
+  //    cleared the template), skip with a clear reason.
+  const dmTemplate = await settingRepo.get(SETTING_KEYS.linkedinDmTemplate);
   if (!dmTemplate || !dmTemplate.value.trim()) {
     logger.warn(
       { contactId: contact.id, key: SETTING_KEYS.linkedinDmTemplate },
@@ -657,17 +654,20 @@ async function autoDraftDmForContact(
     return { status: 'skipped', skipReason: 'template_missing' };
   }
 
-  // 3. Build the render context. firstName uses the same splitter the
-  //    discovery path uses so a one-name-only contact (no firstName derivable)
-  //    gracefully falls through to the "render error" branch via
-  //    UnresolvedTemplateVarsError if the template references firstName.
+  // 3. Build the render context. The spec (requirements.md § 4.6) lists
+  //    four variables: outreachEmployeeName, jobTitle, companyName, jobLink.
+  //    `outreachEmployeeName` resolves to the contact's first name (via
+  //    the same splitter the discovery path uses). A one-name-only contact
+  //    with no derivable first name falls through to UnresolvedTemplateVarsError
+  //    below and we skip the auto-draft; the Queue UI can offer a manual
+  //    edit later.
   const { firstName } = splitName(contact.name);
   const vars: Record<string, string> = {
     jobTitle: job.jobTitle,
     companyName: job.companyName,
-    myName: displayName?.value ?? 'me',
+    jobLink: job.jobUrl,
   };
-  if (firstName) vars.firstName = firstName;
+  if (firstName) vars.outreachEmployeeName = firstName;
 
   let renderedBody: string;
   try {
