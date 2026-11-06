@@ -40,6 +40,9 @@ function dmDrafted(): AppEvent {
 function dmSent(): AppEvent {
   return { type: 'linkedin_dm_sent', payload: {} };
 }
+function queueSkipped(kind: 'connect' | 'dm'): AppEvent {
+  return { type: 'queue_skipped', payload: { kind } };
+}
 
 function gmailQueued(): AppEvent {
   return { type: 'gmail_queued', payload: {} };
@@ -85,6 +88,57 @@ describe('nextLinkedinStatus — happy path transitions', () => {
 
   it('CONNECT_SENT + acceptance → CONNECTED', () => {
     expect(nextLinkedinStatus('CONNECT_SENT', acceptance())).toBe('CONNECTED');
+  });
+
+  it('CONNECT_DRAFTED + acceptance → CONNECTED (user forgot to mark sent)', () => {
+    // Real-world case: Vandana sent the connect on LinkedIn but didn't
+    // click "Mark connect sent" in the dashboard. LinkedIn still emails
+    // the acceptance, and we must not refuse to apply it — the acceptance
+    // is itself evidence that the connect was sent. The poller handler
+    // synthesizes a `linkedin_connect_sent` event alongside this to keep
+    // the event log coherent; the state machine's job is just to accept
+    // the transition.
+    expect(nextLinkedinStatus('CONNECT_DRAFTED', acceptance())).toBe(
+      'CONNECTED',
+    );
+  });
+
+  it('canApplyLinkedinEvent accepts CONNECT_DRAFTED + acceptance', () => {
+    expect(canApplyLinkedinEvent('CONNECT_DRAFTED', acceptance())).toBe(true);
+  });
+
+  it('DM_DRAFTED + queue_skipped(dm) → SKIPPED', () => {
+    // User hit "Skip" on a DM card in the Queue UI. Terminal state;
+    // reconciler ignores SKIPPED rows (its SQL filter is only CONNECTED).
+    expect(
+      nextLinkedinStatus('DM_DRAFTED', queueSkipped('dm')),
+    ).toBe('SKIPPED');
+  });
+
+  it('SKIPPED + queue_skipped(dm) → SKIPPED (idempotent)', () => {
+    expect(
+      nextLinkedinStatus('SKIPPED', queueSkipped('dm')),
+    ).toBe('SKIPPED');
+  });
+
+  it('queue_skipped(connect) is a no-op in v1 (Connect-side skip not wired)', () => {
+    // The payload discriminates: kind:'dm' flips to SKIPPED, kind:'connect'
+    // passes through as a no-op until a Connect-tab Skip CTA ships.
+    expect(
+      nextLinkedinStatus('CONNECT_DRAFTED', queueSkipped('connect')),
+    ).toBe('CONNECT_DRAFTED');
+  });
+
+  it('CONNECTED + queue_skipped(dm) throws (no DM has been drafted yet)', () => {
+    expect(() =>
+      nextLinkedinStatus('CONNECTED', queueSkipped('dm')),
+    ).toThrow(/illegal transition/);
+  });
+
+  it('DM_SENT + queue_skipped(dm) throws (we already sent, nothing to skip)', () => {
+    expect(() =>
+      nextLinkedinStatus('DM_SENT', queueSkipped('dm')),
+    ).toThrow(/illegal transition/);
   });
 
   it('CONNECTED + dm_drafted → DM_DRAFTED', () => {

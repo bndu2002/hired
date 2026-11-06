@@ -27,6 +27,7 @@ const LinkedinStatusSchema = z.enum([
   'DM_SENT',
   'REPLIED',
   'DECLINED',
+  'SKIPPED',
 ]);
 
 const PreviousContactSchema = z.object({

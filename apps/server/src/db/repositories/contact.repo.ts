@@ -429,3 +429,30 @@ export async function listWithJobByLinkedinStatus(
   );
   return result.rows.map(rowToContactWithJob);
 }
+
+/**
+ * Contacts stranded in CONNECTED without a stored DM draft.
+ *
+ * Powers the DM-draft reconciliation loop (`services/dmDraftReconciler.ts`),
+ * which runs on server boot and at the start of each inbound-poll tick.
+ * The classic case this catches: an acceptance email landed, the handler
+ * wrote the `linkedin_acceptance_detected` event + flipped status to
+ * CONNECTED, but the process died (or hit an exception) before the inline
+ * auto-draft could run. The event log and status cache say "already
+ * CONNECTED", so the idempotent-skip rule in the poller never retries
+ * the draft on subsequent polls — this query is how we find those
+ * stranded rows and heal them.
+ *
+ * Ordered by `last_activity DESC` so the most recent acceptances get
+ * reconciled first.
+ */
+export async function listContactsNeedingDmDraft(): Promise<Contact[]> {
+  const result = await pool.query<ContactRow>(
+    `SELECT *
+       FROM contacts
+      WHERE linkedin_status = 'CONNECTED'
+        AND linkedin_dm_draft IS NULL
+      ORDER BY last_activity DESC`,
+  );
+  return result.rows.map(rowToContact);
+}

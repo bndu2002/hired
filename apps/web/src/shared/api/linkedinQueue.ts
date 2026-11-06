@@ -62,6 +62,7 @@ const LinkedinStatusSchema = z.enum([
   'DM_SENT',
   'REPLIED',
   'DECLINED',
+  'SKIPPED',
 ]);
 
 const MarkSentOkSchema = z.object({
@@ -144,6 +145,73 @@ export function useMarkSent(): UseMutationResult<
           err.body.error === 'already_sent'
         ) {
           return { kind: input.kind, alreadySent: true as const };
+        }
+        throw err;
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: linkedinQueueKeys.all });
+    },
+  });
+}
+
+// ─── mark-skipped ───────────────────────────────────────────────────────────
+
+export type MarkSkippedKind = 'dm';
+
+export interface MarkSkippedInput {
+  readonly contactId: number;
+  readonly kind: MarkSkippedKind;
+}
+
+const MarkSkippedOkSchema = z.object({
+  contactId: z.number(),
+  kind: z.enum(['dm']),
+  statusChange: z.object({
+    from: LinkedinStatusSchema,
+    to: LinkedinStatusSchema,
+  }),
+});
+
+export type MarkSkippedOk = z.infer<typeof MarkSkippedOkSchema>;
+
+/**
+ * Mirrors `useMarkSent`'s pattern:
+ * - 202 ok → return the parsed body
+ * - 409 already_skipped → treat as success (invalidate so the card
+ *   disappears either way), return `{ kind, alreadySkipped: true }`
+ * - any other 409 (illegal_state) + 404 + 5xx → bubble as ApiError
+ *
+ * On success, invalidates the queue so the skipped card falls off the DM
+ * tab immediately.
+ */
+export function useMarkSkipped(): UseMutationResult<
+  MarkSkippedOk | { kind: MarkSkippedKind; alreadySkipped: true },
+  Error,
+  MarkSkippedInput
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input) => {
+      try {
+        const raw = await apiFetch<unknown>('/api/linkedin-queue/skip', {
+          method: 'POST',
+          body: input,
+        });
+        return MarkSkippedOkSchema.parse(raw);
+      } catch (err) {
+        if (
+          err &&
+          typeof err === 'object' &&
+          'status' in err &&
+          err.status === 409 &&
+          'body' in err &&
+          err.body &&
+          typeof err.body === 'object' &&
+          'error' in err.body &&
+          err.body.error === 'already_skipped'
+        ) {
+          return { kind: input.kind, alreadySkipped: true as const };
         }
         throw err;
       }

@@ -66,7 +66,10 @@ CREATE TABLE IF NOT EXISTS contacts (
                                             -- PENDING | QUEUED | SENT | REPLIED | BOUNCED | FAILED
     linkedin_status          VARCHAR(32) DEFAULT 'PENDING',
                                             -- PENDING | CONNECT_DRAFTED | CONNECT_SENT
-                                            -- | CONNECTED | DM_DRAFTED | DM_SENT | REPLIED | DECLINED
+                                            -- | CONNECTED | DM_DRAFTED | DM_SENT | REPLIED
+                                            -- | DECLINED | SKIPPED
+                                            -- SKIPPED = user hit "Skip" on a DM card
+                                            -- in the Queue UI (phase-5.3c). Terminal.
     gmail_thread_id          VARCHAR(255),
     linkedin_dm_draft        TEXT,                 -- rendered template, ready to send
     discovered_via           VARCHAR(32),          -- which DiscoverySource adapter (D4 telemetry)

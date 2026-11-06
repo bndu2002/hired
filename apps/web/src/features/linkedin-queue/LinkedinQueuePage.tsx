@@ -8,10 +8,12 @@ import {
   Linkedin,
   Loader2,
   Send,
+  Ban,
 } from 'lucide-react';
 import {
   useLinkedinQueue,
   useMarkSent,
+  useMarkSkipped,
   type MarkSentKind,
   type QueueConnectItem,
   type QueueDmItem,
@@ -284,7 +286,12 @@ function ConnectCard({ item }: { readonly item: QueueConnectItem }) {
 
 function DmCard({ item }: { readonly item: QueueDmItem }) {
   const markSent = useMarkSent();
+  const markSkipped = useMarkSkipped();
   const [copied, setCopied] = useState(false);
+  // Two-click Skip: first click arms a confirmation row, second click fires
+  // the mutation. Avoids a misclick turning into a quiet state transition
+  // on a terminal state (SKIPPED). Local state only — nothing persisted.
+  const [confirmingSkip, setConfirmingSkip] = useState(false);
 
   async function copyDraft() {
     try {
@@ -322,55 +329,121 @@ function DmCard({ item }: { readonly item: QueueDmItem }) {
         {item.draft}
       </pre>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          variant="secondary"
-          size="sm"
-          leading={
-            copied ? (
-              <ClipboardCheck
-                className="h-3.5 w-3.5 text-emerald-600"
-                aria-hidden="true"
-              />
-            ) : (
-              <Clipboard className="h-3.5 w-3.5" aria-hidden="true" />
-            )
-          }
-          onClick={copyDraft}
-        >
-          {copied ? 'Copied' : 'Copy draft'}
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          leading={<ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />}
-          onClick={() =>
-            window.open(item.linkedinUrl, '_blank', 'noopener,noreferrer')
-          }
-        >
-          Open on LinkedIn
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          leading={
-            markSent.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-            ) : (
-              <Send className="h-3.5 w-3.5" aria-hidden="true" />
-            )
-          }
-          disabled={markSent.isPending}
-          onClick={() =>
-            markSent.mutate({ contactId: item.contactId, kind: 'dm' })
-          }
-        >
-          Mark DM sent
-        </Button>
-      </div>
+      {confirmingSkip ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-rose-200 bg-rose-50 p-2 text-sm text-rose-800">
+          <span className="font-medium">Skip {item.name}?</span>
+          <span className="text-xs text-rose-700">
+            Status flips to SKIPPED. No DM will be sent.
+          </span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={markSkipped.isPending}
+              onClick={() => setConfirmingSkip(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              leading={
+                markSkipped.isPending ? (
+                  <Loader2
+                    className="h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                )
+              }
+              disabled={markSkipped.isPending}
+              onClick={() =>
+                markSkipped.mutate(
+                  { contactId: item.contactId, kind: 'dm' },
+                  {
+                    onSuccess: () => {
+                      // Invalidate will remove the card from the list;
+                      // local state reset is defensive in case the mutation
+                      // succeeds but the invalidation refetch takes a tick.
+                      setConfirmingSkip(false);
+                    },
+                  },
+                )
+              }
+            >
+              Yes, skip
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            leading={
+              copied ? (
+                <ClipboardCheck
+                  className="h-3.5 w-3.5 text-emerald-600"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Clipboard className="h-3.5 w-3.5" aria-hidden="true" />
+              )
+            }
+            onClick={copyDraft}
+          >
+            {copied ? 'Copied' : 'Copy draft'}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            leading={
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+            }
+            onClick={() =>
+              window.open(item.linkedinUrl, '_blank', 'noopener,noreferrer')
+            }
+          >
+            Open on LinkedIn
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            leading={
+              markSent.isPending ? (
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Send className="h-3.5 w-3.5" aria-hidden="true" />
+              )
+            }
+            disabled={markSent.isPending}
+            onClick={() =>
+              markSent.mutate({ contactId: item.contactId, kind: 'dm' })
+            }
+          >
+            Mark DM sent
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            leading={<Ban className="h-3.5 w-3.5" aria-hidden="true" />}
+            onClick={() => setConfirmingSkip(true)}
+            title="Decide not to send this DM. Marks the contact SKIPPED (terminal)."
+          >
+            Skip
+          </Button>
+        </div>
+      )}
 
       {markSent.isError && (
         <MutationErrorRow error={markSent.error} kind="dm" />
+      )}
+      {markSkipped.isError && (
+        <SkipErrorRow error={markSkipped.error} name={item.name} />
       )}
     </div>
   );
@@ -423,6 +496,23 @@ function MutationErrorRow({
       <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       <div>
         Couldn't mark {kind === 'dm' ? 'DM' : 'connect'} sent. {error.message}
+      </div>
+    </div>
+  );
+}
+
+function SkipErrorRow({
+  error,
+  name,
+}: {
+  readonly error: Error;
+  readonly name: string;
+}) {
+  return (
+    <div className="mt-3 flex items-start gap-2 rounded-md border border-rose-200 bg-rose-50 p-2 text-xs text-rose-800">
+      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <div>
+        Couldn't skip {name}. {error.message}
       </div>
     </div>
   );

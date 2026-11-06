@@ -437,12 +437,19 @@ SENT    ──[gmail_bounced delayed]──> BOUNCED
 ```
 PENDING          ──[contact_selected linkedin=true]──> CONNECT_DRAFTED
 CONNECT_DRAFTED  ──[linkedin_connect_sent]──> CONNECT_SENT
+CONNECT_DRAFTED  ──[linkedin_acceptance_detected]──> CONNECTED  (phase-5.3c)
 CONNECT_SENT     ──[linkedin_acceptance_detected]──> CONNECTED
 CONNECT_SENT     ──[30 days silent]──> DECLINED
 CONNECTED        ──[linkedin_dm_drafted (auto)]──> DM_DRAFTED
 DM_DRAFTED       ──[linkedin_dm_sent]──> DM_SENT
+DM_DRAFTED       ──[queue_skipped kind=dm]──> SKIPPED    (phase-5.3c)
 DM_SENT          ──[reply_received channel=linkedin]──> REPLIED
 ```
+
+**Changed from spec (as-built, Nov 2026 — phase-5.3c):**
+
+- New terminal status `SKIPPED` added to `LinkedinStatus` for the Queue UI's Skip CTA. Distinct from `DECLINED` on purpose: DECLINED connotes "they declined us" or "no response in N days"; SKIPPED connotes "I (the user) decided not to send". Both are terminal; the event-log payload (`queue_skipped { kind: 'dm' }` vs. `30_days_silent`) carries the full reason for replay.
+- Transition `DM_DRAFTED → SKIPPED` on `queue_skipped { kind: 'dm' }`. The payload's `kind: 'connect'` discriminator is reserved for a future Connect-tab Skip CTA; v1 doesn't wire it (state machine passes through as a no-op).
 
 A transition that's not in the table throws — this catches bugs where we try to update status in the wrong order (e.g., `SENT → QUEUED` would be nonsense).
 
@@ -680,6 +687,11 @@ Acceptance detection goes through Gmail (§10), not through LinkedIn.
 **Changed from spec (as-built audit, Oct 2026):**
 
 - `settingsSeeder.ts` populates a `linkedin.connect_template` row in `app_settings` even though NOTHING reads it today. The template exists for a possible future "custom note on connect" option that would require a spec change. The seeder file contains a prominent `⚠ FLOW B INVARIANT ⚠` comment next to the seed so a future dev doesn't accidentally wire this value to a render call and silently violate Flow B. If you reach for this value in code: stop, revisit this section, update the spec.
+
+**Changed from spec (as-built, Nov 2026 — Phase 5.3c):**
+
+- **Acceptance tolerated from `CONNECT_DRAFTED`, not just `CONNECT_SENT`.** The spec's state machine (§ 6) draws `CONNECT_SENT → CONNECTED` on acceptance. In practice, Vandana sends the connect on LinkedIn and the "Mark connect sent" dashboard click is a separate manual step that's easy to miss. If LinkedIn's acceptance email arrives while the contact is still at `CONNECT_DRAFTED`, we KNOW the connect was sent (nothing else explains the acceptance), so refusing the transition would strand real data. State machine now accepts the event from `{CONNECT_DRAFTED, CONNECT_SENT}`. The poller's `handleLinkedInNotification` synthesizes a `linkedin_connect_sent` event alongside the acceptance when the current status is `CONNECT_DRAFTED`, so the append-only event log keeps reading `drafted → sent (synthetic or natural) → accepted → dm_drafted`.
+- **DM auto-draft is now driven by a reconciliation loop, not just the inline side effect.** The spec implied the auto-draft was a single-step side effect of acceptance detection. In practice, if the process dies between persisting the acceptance event and running the inline auto-draft, the contact gets stranded in `CONNECTED` without a stored draft and the idempotent-skip rule never retries. `services/dmDraftReconciler.ts::reconcileMissingDmDrafts()` queries `contacts WHERE linkedin_status = 'CONNECTED' AND linkedin_dm_draft IS NULL` and runs the shared `dmDraftRenderer.autoDraftDmForContact()` on each. It's called at server boot (right after settings seeding, before the inbound-poll cron starts) and at the top of every inbound-poll tick. The live acceptance path still runs the renderer inline for the happy case; the reconciler is the safety net.
 
 ---
 
