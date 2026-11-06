@@ -34,6 +34,7 @@ import {
   emailFinderRegistry,
   emailVerifierRegistry,
 } from './services/providerRegistry.js';
+import { reconcileMissingDmDrafts } from './services/dmDraftReconciler.js';
 import { seedDefaultSettings } from './services/settingsSeeder.js';
 
 // Register adapters once at module load. Keeping this at module scope (not
@@ -165,6 +166,13 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     // can PUT /api/settings/:key directly if seeding ever breaks.
     seedDefaultSettings().catch((err) => {
       logger.error({ err }, 'settings seeder failed');
+    });
+    // Reconcile any contacts stranded in CONNECTED without a stored DM
+    // draft — picks up anyone the inline auto-draft missed before the
+    // process last went down. Non-fatal; the inbound-poll tick also runs
+    // reconciliation at its start as the ongoing safety net.
+    reconcileMissingDmDrafts().catch((err) => {
+      logger.error({ err }, 'dm-draft reconciler: boot pass failed');
     });
     // Start the inbound poll AFTER the HTTP server is listening so the
     // process is observably alive before background traffic starts. The

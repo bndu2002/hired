@@ -224,3 +224,112 @@ export async function markSent(input: MarkSentInput): Promise<MarkSentResult> {
     to: nextStatus,
   };
 }
+
+
+// ─── mark-skipped ───────────────────────────────────────────────────────────
+
+export type MarkSkippedKind = 'dm';
+
+export interface MarkSkippedInput {
+  readonly contactId: number;
+  readonly kind: MarkSkippedKind;
+}
+
+export type MarkSkippedResult =
+  | {
+      status: 'ok';
+      contactId: number;
+      kind: MarkSkippedKind;
+      from: LinkedinStatus;
+      to: LinkedinStatus;
+    }
+  | {
+      status: 'contact_not_found';
+      contactId: number;
+    }
+  | {
+      status: 'already_skipped';
+      contactId: number;
+      kind: MarkSkippedKind;
+      currentStatus: LinkedinStatus;
+    }
+  | {
+      status: 'illegal_state';
+      contactId: number;
+      kind: MarkSkippedKind;
+      currentStatus: LinkedinStatus;
+    };
+
+/**
+ * User explicitly skipped a drafted outreach. For now DM-only — the Queue
+ * UI's Skip CTA only appears on DM cards; Connect-side skip is deferred
+ * until there's a user ask.
+ *
+ * Semantics: contact's `linkedin_status` flips to `SKIPPED` (terminal); a
+ * `queue_skipped` event with `{ kind: 'dm' }` is appended for audit. The
+ * stored `linkedin_dm_draft` is intentionally left in place — if we ever
+ * build an un-skip flow, the text is preserved. The reconciler ignores
+ * SKIPPED rows (its SQL filter is `WHERE linkedin_status = 'CONNECTED'`).
+ *
+ * Idempotency mirrors `markSent`: already SKIPPED → `already_skipped`
+ * no-op, no duplicate event; illegal from any other state → `illegal_state`.
+ */
+export async function markSkipped(
+  input: MarkSkippedInput,
+): Promise<MarkSkippedResult> {
+  const contact = await contactRepo.getById(input.contactId);
+  if (!contact) {
+    return { status: 'contact_not_found', contactId: input.contactId };
+  }
+
+  const event = makeEvent('queue_skipped', { kind: input.kind });
+
+  if (!canApplyLinkedinEvent(contact.linkedinStatus, event)) {
+    logger.info(
+      {
+        contactId: contact.id,
+        currentStatus: contact.linkedinStatus,
+        kind: input.kind,
+      },
+      'queue: markSkipped rejected — illegal transition for current status',
+    );
+    return {
+      status: 'illegal_state',
+      contactId: contact.id,
+      kind: input.kind,
+      currentStatus: contact.linkedinStatus,
+    };
+  }
+
+  const nextStatus = nextLinkedinStatus(contact.linkedinStatus, event);
+  if (nextStatus === contact.linkedinStatus) {
+    // Already at SKIPPED. Idempotent no-op — don't bloat the event log
+    // with duplicate skips when the user double-clicks or reloads.
+    return {
+      status: 'already_skipped',
+      contactId: contact.id,
+      kind: input.kind,
+      currentStatus: contact.linkedinStatus,
+    };
+  }
+
+  await eventRepo.append(contact.id, event);
+  await contactRepo.updateLinkedinStatus(contact.id, nextStatus);
+  logger.info(
+    {
+      contactId: contact.id,
+      kind: input.kind,
+      from: contact.linkedinStatus,
+      to: nextStatus,
+    },
+    'queue: markSkipped applied',
+  );
+
+  return {
+    status: 'ok',
+    contactId: contact.id,
+    kind: input.kind,
+    from: contact.linkedinStatus,
+    to: nextStatus,
+  };
+}

@@ -18,6 +18,7 @@
  */
 
 import cron from 'node-cron';
+import { reconcileMissingDmDrafts } from '../services/dmDraftReconciler.js';
 import { pollAllAccounts, type PollResult } from '../services/gmailInboundPoller.js';
 import { logger } from '../logger.js';
 
@@ -77,6 +78,13 @@ async function runOneTick(trigger: 'boot' | 'cron'): Promise<void> {
   tickRunning = true;
   const startedAt = Date.now();
   try {
+    // Reconcile BEFORE polling: pick up any contacts in CONNECTED without a
+    // stored DM draft (e.g. acceptance landed last tick but inline auto-draft
+    // was interrupted). Non-throwing per contact; errors are logged + counted.
+    // Doing this first means the Queue reflects reconciled state immediately,
+    // and any new acceptances this tick land on top of a clean baseline.
+    await reconcileMissingDmDrafts();
+
     const results = await pollAllAccounts();
     const totals = summarize(results);
     logger.info(

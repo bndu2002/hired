@@ -24,7 +24,16 @@ export type LinkedinStatus =
   | 'DM_DRAFTED'
   | 'DM_SENT'
   | 'REPLIED'
-  | 'DECLINED';
+  | 'DECLINED'
+  /**
+   * User explicitly skipped a drafted DM — "I don't want to send to this
+   * contact". Reached via POST /api/linkedin-queue/skip from the Queue UI;
+   * writes a `queue_skipped` event with `{ kind: 'dm' }` payload. Distinct
+   * from DECLINED (which denotes "they declined us" or "no response in N
+   * days") so a reader can tell who did the declining from the status
+   * alone. Terminal. Added phase-5.3c (design.md § 6 "Changed from spec").
+   */
+  | 'SKIPPED';
 
 export type Sentiment = 'POSITIVE' | 'NEGATIVE';
 

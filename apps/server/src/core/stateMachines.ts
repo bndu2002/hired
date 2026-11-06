@@ -61,7 +61,20 @@ const LINKEDIN_TRANSITIONS: Readonly<
     to: 'CONNECT_SENT',
   },
   linkedin_acceptance_detected: {
-    from: new Set(['CONNECT_SENT']),
+    // Legal from both CONNECT_DRAFTED and CONNECT_SENT.
+    //
+    // Why CONNECT_DRAFTED is included: the user flow has a human step
+    // between "we drafted this connect" and "we recorded that it was sent"
+    // — Vandana opens LinkedIn, clicks Connect herself, comes back to the
+    // dashboard and clicks "Mark connect sent". It's easy to forget the
+    // second half. If LinkedIn delivers an acceptance email while we're
+    // still at CONNECT_DRAFTED, we KNOW the connect was sent (nothing
+    // else explains the acceptance), so refusing the transition would
+    // leave perfectly valid data stranded. The poller handler synthesizes
+    // a `linkedin_connect_sent` event right before the acceptance so the
+    // append-only log still reads: drafted → sent → accepted. See
+    // design.md § 11 'Changed from spec'.
+    from: new Set(['CONNECT_DRAFTED', 'CONNECT_SENT']),
     to: 'CONNECTED',
   },
   linkedin_dm_drafted: {
@@ -80,6 +93,18 @@ const LINKEDIN_REPLY_FROM: ReadonlySet<LinkedinStatus> = new Set([
   'DM_DRAFTED',
   'DM_SENT',
   'REPLIED',
+]);
+
+/**
+ * Statuses from which the user can SKIP a contact (hit the Skip CTA in the
+ * Queue UI). `queue_skipped` with `kind: 'dm'` is legal from DM_DRAFTED
+ * (we drafted a DM, the user decides not to send); kind 'connect' is not
+ * wired yet — the Connect tab doesn't have a Skip button in v1 (requested
+ * phase-5.3c, DM-only scope). Add CONNECT_DRAFTED here if a Connect-side
+ * Skip ever lands.
+ */
+const LINKEDIN_DM_SKIP_FROM: ReadonlySet<LinkedinStatus> = new Set([
+  'DM_DRAFTED',
 ]);
 
 /**
@@ -102,6 +127,20 @@ export function nextLinkedinStatus(
       );
     }
     return 'REPLIED';
+  }
+
+  // queue_skipped is cross-channel too — kind: 'dm' affects LinkedIn status.
+  // kind: 'connect' is reserved for a future Connect-tab Skip CTA; not
+  // wired in v1.
+  if (event.type === 'queue_skipped') {
+    if (event.payload.kind !== 'dm') return current;
+    if (current === 'SKIPPED') return current; // idempotent
+    if (!LINKEDIN_DM_SKIP_FROM.has(current)) {
+      throw new Error(
+        `linkedin state machine: illegal transition ${current} + queue_skipped(dm)`,
+      );
+    }
+    return 'SKIPPED';
   }
 
   // Non-LinkedIn events never change linkedin_status.

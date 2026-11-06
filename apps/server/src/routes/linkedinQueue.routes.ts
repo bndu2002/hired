@@ -108,3 +108,79 @@ linkedinQueueRouter.post('/mark-sent', async (req, res, next) => {
     next(err);
   }
 });
+
+// ─── POST /api/linkedin-queue/skip ─────────────────────────────────────────
+
+const skipBody = z.object({
+  contactId: z.number().int().positive(),
+  // v1: DM only. If a Connect-side Skip CTA is ever added, extend the enum.
+  // Kept as an enum (not a literal) so the client is forced to send a
+  // discriminator — matches the mark-sent shape and leaves the extension
+  // path open.
+  kind: z.enum(['dm']),
+});
+
+linkedinQueueRouter.post('/skip', async (req, res, next) => {
+  try {
+    const parsed = skipBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'invalid_payload',
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+
+    const result = await linkedinQueue.markSkipped(parsed.data);
+
+    switch (result.status) {
+      case 'ok':
+        // 202 Accepted — same semantics as mark-sent: we recorded a
+        // user-driven state change (nothing hit LinkedIn's servers).
+        res.status(202).json({
+          contactId: result.contactId,
+          kind: result.kind,
+          statusChange: { from: result.from, to: result.to },
+        });
+        return;
+
+      case 'contact_not_found':
+        res.status(404).json({
+          error: 'contact_not_found',
+          contactId: result.contactId,
+        });
+        return;
+
+      case 'already_skipped':
+        // 409 Conflict — same shape as already_sent. UI treats this as a
+        // no-op success (invalidate the queue, the row's already gone).
+        res.status(409).json({
+          error: 'already_skipped',
+          contactId: result.contactId,
+          kind: result.kind,
+          currentStatus: result.currentStatus,
+        });
+        return;
+
+      case 'illegal_state':
+        res.status(409).json({
+          error: 'illegal_state',
+          contactId: result.contactId,
+          kind: result.kind,
+          currentStatus: result.currentStatus,
+          message: `cannot skip ${result.kind} from status ${result.currentStatus}`,
+        });
+        return;
+
+      default: {
+        const _exhaustive: never = result;
+        void _exhaustive;
+        logger.error({ result }, 'unhandled MarkSkippedResult status');
+        res.status(500).json({ error: 'internal_error' });
+        return;
+      }
+    }
+  } catch (err) {
+    next(err);
+  }
+});
