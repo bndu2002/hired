@@ -1,8 +1,26 @@
 # My Activity — design brief for Phase 4.7
 
-> **Status:** Pending build · **Owner:** Vandana · **Reference:** screenshots captured from Happy Agent (Oct 2026) during the Phase 5.3 LinkedIn Queue UI session. The screenshots are the source of truth for layout; this file is the written capture so context compaction doesn't lose details.
+> **Status:** In build (phase-4.7) · **Owner:** Vandana · **Reference:** 5 Happy Agent screenshots captured Oct–Nov 2026 (initial 4 during the Phase 5.3 LinkedIn Queue UI session; 1 more during Phase 4.7 kick-off showing the Preeti popover timeline). The screenshots are the visual source of truth for layout; this file is the written capture so context compaction doesn't lose details.
+>
+> **Rule for the agent:** This file is authoritative. If anything differs between here and the SS when building, flag it and ask — don't guess.
 
-The Phase 4.7 spec task says "renders runs with their contacts" at a high level. Vandana provided four Happy Agent screenshots that show the actual UX we're mirroring, and the shape goes significantly beyond "table of runs". This file is the full design brief so a future build session hits the right target without re-asking.
+The Phase 4.7 spec task says "renders runs with their contacts" at a high level. Vandana provided screenshots that show the actual UX we're mirroring, and the shape goes significantly beyond "table of runs". This file is the full design brief so a future build session hits the right target without re-asking.
+
+---
+
+## Changed Nov 2026 — row = job, not run
+
+The initial build showed one row per run. Vandana ran the agent multiple times on the same job during testing and the dashboard filled with duplicate rows per company. We now **group by `jobs.job_url`** — one row per unique job, however many Run Agent clicks landed on it.
+
+Grouping rules (locked):
+- **Status** of the row = the LATEST run's status (`ORDER BY runs.created_at DESC LIMIT 1`). Where did my most recent attempt land?
+- **Marked-as-interview** = true if ANY run in the group is flagged (one interview outcome belongs to the whole job).
+- **Last Activity** = MAX across all runs' `last_activity` (each run's `last_activity` is already MAX of its contact timestamps).
+- **Contacts** are deduped across runs by `linkedinUrl || email || name` (lowercased). The representative row = contact with the most timeline events (richest history wins); tiebreaker is latest `last_activity`.
+- **Per-contact timeline** = union of events across every row that collapsed into the dedupe bucket, sorted chronologically. The user sees "this person's full outreach history across every run" instead of three disconnected mini-histories.
+- **selected_for_gmail / selected_for_linkedin** = true if ANY row in the dedupe bucket was selected — so a pill appears if the user ever reached out via that channel.
+
+Everything else in this brief still applies — only the grouping unit changed.
 
 ---
 
@@ -23,19 +41,19 @@ Filter row:
 - `Referral Status [Success ▾]` — maps to our `runs.status`: `Success → COMPLETED`, plus `In progress → IN_PROGRESS`, `Failed → FAILED`, `All`.
 - `Last Activity [dd-mm-yyyy] to [dd-mm-yyyy]` — date range filter on the derived "last activity" timestamp per run.
 
-## Table — collapsed row (one per run)
+## Table — collapsed row (one per unique job)
 
 Columns: `No. | Run By | Company | Role | Status | Last Activity`
 
-- **No.** — 1-indexed row counter, not `run.id`. Resets per filter result.
+- **No.** — 1-indexed row counter per filter result, not `job.id` or `run.id`.
 - **Run By pill** — `You` (slate pill) for manual, `Auto` (teal pill) for scheduled. v1 is always `You`.
-- **Company** cell — company icon + name + a people-group icon with a chevron that expands/collapses the row's contact list.
+- **Company** cell — company icon + name + a chevron that expands/collapses the row's deduped contact list.
 - **Role** cell — job title with external-link icon. Opens `job.job_url` in a new tab.
-- **Status pill** — `COMPLETED` (emerald), `IN_PROGRESS` (amber), `FAILED` (rose). Matches our `shared/components/Badge.tsx` tone palette.
-- **Last Activity** — two lines: date on top, time below. Right-aligned.
+- **Status pill** — latest run's status: `COMPLETED` (emerald), `IN_PROGRESS` (amber), `FAILED` (rose). Matches our `shared/components/Badge.tsx` tone palette.
+- **Last Activity** — two lines: date on top, time below. Right-aligned. MAX across all runs' `last_activity`.
 
 Derivation:
-- `last_activity` per run = `MAX(contacts.last_activity) WHERE contacts.run_id = run.id`. We already maintain the column everywhere the orchestrator / poller touches a contact.
+- Per-run `last_activity` = `MAX(contacts.last_activity) WHERE contacts.run_id = run.id`. We already maintain the column everywhere the orchestrator / poller touches a contact. Per-job `last_activity` = MAX across runs.
 
 ## Table — expanded row (contacts under the run)
 
@@ -56,56 +74,71 @@ Channel pills shown ONLY for channels the contact was selected for:
 `[📧 email@domain.com ✓]` where the ✓ ring is green when `email_verified = true` and amber when false. The address text is small-slate; the ring is the status signal.
 
 ### LinkedIn pill shape
-`[in LinkedIn ↗  <status badge>]` where:
-- Clicking the pill does TWO things (see below): opens the message viewer AND, as a side effect of the `↗`, could open the profile — but to avoid ambiguity we open the message viewer on pill click and expose "Open on LinkedIn" inside the popover.
-- Status badge is a small circle inside the pill with a count/dot that reflects `linkedin_status`:
-  - CONNECT_DRAFTED / CONNECT_SENT → amber dot
-  - CONNECTED / DM_DRAFTED → amber dot (still pending from user's perspective)
-  - DM_SENT → emerald dot
-  - REPLIED → emerald dot + a small count
-  - DECLINED → rose dot
-
-The exact badge content is a UX nicety — in v1 keep it simple with just the status color.
+`[in LinkedIn ↗  ●]` where:
+- Clicking anywhere on the pill opens the message viewer popover. The `↗` glyph is cosmetic in this slice — "open profile on LinkedIn" is exposed as a link INSIDE the popover (so clicking the pill isn't ambiguous).
+- The dot (`●`) at the right of the pill is a status indicator — a small filled circle, not a numeric badge. v1 color map (locked in Nov 2026 — Happy's own badge shows a numeric reply count, but our reply model only yields 0 or 1, so dot-only is strictly more useful):
+  - PENDING, CONNECT_DRAFTED, CONNECT_SENT → amber (in flight, awaiting external action)
+  - CONNECTED, DM_DRAFTED → amber (still pending from user's perspective — DM not yet sent)
+  - DM_SENT → emerald (we're done; waiting for reply)
+  - REPLIED → emerald (they replied; good outcome)
+  - DECLINED → rose (external no-go)
+  - SKIPPED → slate (user explicitly skipped)
+- When Phase 4.5 reply classification lands, the dot can split into sentiment-aware tones (POSITIVE / NEGATIVE). Not v1.
 
 ## The message viewer (THE big feature of this page)
 
-This is the piece that makes My Activity more than a status table. Clicking a channel pill opens a popover anchored to the pill. Clicking anywhere in the popover's message body pins it inline — the popover closes and the message becomes a persistent expanded panel attached to the contact row.
+This is what makes My Activity more than a status table. Clicking a channel pill opens a popover anchored to the pill. Clicking the "Click to pin full message" footer promotes the popover content to a persistent inline panel below the contact row. Multiple contacts can be pinned at once.
 
 ### Popover contents
 
-**Timeline section** (bulleted list, chronological):
-- `✓ Message sent — Done` (date/time on the right of the row)
-- `✓ Follow-up — Done` (date/time — v1 doesn't send follow-ups, so hide this row entirely unless a `followup_sent` event exists)
-- Future rows as more events accumulate (`✓ Reply received`, intent tag, etc.)
+**Timeline section** — one row per outreach-lifecycle milestone, in chronological order. Each row: green `✓` icon on the left, label, `Done` tag (slate) on the right. Terminal states use their own icon + tone (see below).
 
-For LinkedIn in v1 this reads from these events:
-- `linkedin_connect_sent` → "Connect sent"
-- `linkedin_dm_sent` → "DM sent"
-- `reply_received` channel=linkedin → "Reply received"
+**v1 vocabulary (locked in from Happy's SS, Nov 2026):**
+
+| Event source | Timeline row label |
+|---|---|
+| `linkedin_connect_sent` | `Connection sent` |
+| `linkedin_acceptance_detected` | `Connection accepted` |
+| `linkedin_dm_sent` | `Message sent` |
+| `gmail_sent` (Phase 4.4) | `Message sent` |
+| `reply_received` | `Reply received` |
+| `queue_skipped` | `Skipped` (slate ✘, no "Done" tag) |
+| future `followup_sent` | `Follow-up` — hidden row until the event exists |
+| future `30-day silent` derivation | `Declined` (rose ○) |
+
+**Filtered OUT** of the timeline (noise for a user-facing view):
+`contact_discovered`, `email_find_attempted`, `email_found`, `email_not_found`, `email_verified`, `email_unverifiable`, `contact_selected`, `linkedin_connect_drafted`, `linkedin_dm_drafted`, `gmail_queued`.
+
+These are internal workflow states; the user only cares about world-visible milestones.
 
 **MESSAGE section** (below the timeline):
 - Label: `MESSAGE` (small uppercase)
-- Body: the actual sent text. For LinkedIn this is `contact.linkedin_dm_draft` (we already store it at auto-draft time). For Gmail it's the email body — not stored today, Phase 4.4 blocker.
-- The body wraps naturally; max ~8 lines before an in-popover scroll kicks in.
-- Footer link: `Click to pin full message` → promotes the popover content into an inline expanded panel below the contact row.
+- Body: the actual sent text.
+  - LinkedIn → `contact.linkedin_dm_draft` (stored at auto-draft time)
+  - Gmail → **not stored today, Phase 4.4 blocker.** v1 popover shows the greyed-out placeholder: `Email not dispatched yet. Gmail dispatch arrives in Phase 4.4.`
+- Body scrolls inside the popover (max ~8 lines before scroll).
+- Footer link: `Click to pin full message` → the pinned panel takes over below the row and the popover closes.
 
 ### Pinned (inline) view
 
-Same timeline + message content, but rendered as an attached panel below the row instead of a popover. Multiple contacts can be pinned simultaneously — gives Vandana a side-by-side view of several outreach messages at once. Clicking the pill again (or an explicit close affordance on the pinned panel) collapses it back.
+Same timeline + message content, rendered as an attached panel below the contact row instead of as a floating popover. Multiple contacts can be pinned simultaneously (side-by-side comparison). Click the pill again (or an `×` affordance on the pinned panel) to collapse.
+
+**Pin state is local component state in `MyActivityPage.tsx`** — lost on page refresh. Keeps the slice small; if we want cross-session persistence later we add `localStorage` or a user preference.
 
 ---
 
 ## Data model implications
 
-### Backend
+### Backend (as shipped)
 
-- `GET /api/activity` — returns `{ runs: [{ runId, no, runBy, company, jobTitle, jobUrl, status, lastActivity, counts: { contactsTotal, replied, interviews } }] }`. The counts drive the tab headers. This payload does NOT include per-contact detail.
-- `GET /api/activity/runs/:runId/contacts` — called when a user expands a row. Returns `[{ contactId, no, name, title, selectedForGmail, selectedForLinkedin, email, emailVerified, linkedinUrl, gmailStatus, linkedinStatus }]`.
-- `GET /api/contacts/:id/history?channel=linkedin|gmail` — called when a user clicks a channel pill or expands the pinned panel. Returns `{ timeline: [{ eventType, at, label }], message: { body, renderedAt } | null }`. Lazy-loaded so the main /activity response stays tight.
+Single endpoint: `GET /api/activity` returns `{ tabCounts: {...}, jobs: [{ jobKey, runBy, status, markedAsInterview, lastActivity, company, jobTitle, jobUrl, runIds[], contacts: [{...contactView, timeline: {linkedin, gmail}}] }] }`. Contacts are already deduped and timelines unioned per the grouping rules above.
 
-### Scope note
+Three queries composed in `services/activity.ts`:
+1. `listRunsWithJob()` — one row per run with job inlined, newest-first.
+2. `listContactsForRuns(runIds)` — all contacts across those runs.
+3. `listTimelineEventsForContacts(contactIds)` — only outreach-lifecycle events (TIMELINE_EVENT_TYPES in the repo).
 
-Three endpoints is a lot. Pragmatic v1: fold them into `/api/activity?include=contacts,history` returning everything up front. The main dashboard is only going to be a few dozen runs in week 1; profiling says "do the simple thing until it's slow". Keep `GET /api/contacts/:id/history` on the roadmap for when the list is 100+ rows.
+Grouping + dedup happens in the service layer. Everything up-front; filters are client-side in v1. When the list exceeds ~100 jobs we'll push filters server-side with query params and consider lazy-loading contacts.
 
 ### Database — nothing new needed
 
@@ -119,21 +152,9 @@ The one gap: **Gmail body isn't stored anywhere.** When Phase 4.4 (Gmail dispatc
 
 ---
 
-## Template extension (parallel sub-task)
+## Template extension — resolved (not needed)
 
-Vandana's actual LinkedIn DM template references more context than our current 4-variable set (`outreachEmployeeName / jobTitle / companyName / jobLink`). Example from the screenshot:
-
-> I'm applying for **AI Full Stack Developer | Java, Spring Boot, React and GenAI | 2 - 4 Years | 100% Remote (Work from Home)** at Avensys Consulting
-
-The bold string is `jobTitle | mustHaveSkills | experienceRange | locationHint` joined with ` | `. Our current render can't produce this.
-
-**Proposed extension (needs its own small slice OR fold into Phase 4.7):**
-- Add `{{jobTitleFull}}` — computed in the render context, format: non-null fields of `jobTitle / mustHaveSkills / experienceRange / locationHint` joined by ` | `.
-- Update `settingsSeeder.ts` default DM template to use it.
-- Update `gmailInboundPoller.ts::autoDraftDmForContact` render context.
-- Document in `requirements.md § 4.6` and `design.md § 12` as a spec extension, not a drift.
-
-If the user wants a different pitch per contact, the DM auto-draft is still a "starting draft" — the Queue UI's `Copy draft` makes it easy to edit before pasting to LinkedIn. No per-contact AI rewriting is in scope for v1.
+Earlier draft of this brief proposed a `{{jobTitleFull}}` variable (concatenate `jobTitle | mustHaveSkills | experienceRange | locationHint`) based on an interpretation of one Happy screenshot. When Vandana pasted her actual LinkedIn DM template in phase-5.3c, it uses just `{{jobTitle}}` — not the concatenated form. **No template extension needed in Phase 4.7.** Templates work as-is from the spec's four-variable set.
 
 ---
 
@@ -147,9 +168,11 @@ Build in Phase 4.7:
 - `All Activity` tab wired; `Responses` and `Interviews` tabs stubbed with counts only.
 
 Deferred (named owners / phases below):
-- Date range server-side filter pushdown (Phase 6 if needed).
+- Date range server-side filter pushdown (Phase 6 if needed; v1 keeps client-side).
 - Responses tab actual contents (Phase 6.1).
 - Interviews tab actual contents + "Mark as Interview" button (Phase 6.2).
-- Gmail body display in message viewer (needs Phase 4.4 to actually persist Gmail body).
-- Reply classification sentiment+intent in the timeline (Phase 4.5).
-- `{{jobTitleFull}}` template variable — ideally fold into Phase 4.7 if small enough; else its own slice.
+- Gmail body display in message viewer with real text (needs Phase 4.4 to persist Gmail body on send). v1 popover shows the "Email not dispatched yet" placeholder.
+- Reply classification sentiment+intent as a sub-row under `Reply received` (Phase 4.5).
+- Cross-session pin persistence (localStorage or user prefs — only if the UX friction surfaces).
+- Numeric reply-count badge on the LinkedIn pill (Happy's version). v1 ships a status-color dot; swap or augment when Phase 4.5 ships multiple-reply tracking.
+- Column header `(?)` tooltips (Happy shows `Status (?)` and `Run By (?)`). Nice-to-have; skip in v1 unless the labels are ambiguous in use.
