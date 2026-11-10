@@ -22,6 +22,7 @@ import {
   startInboundPollCron,
   stopInboundPollCron,
 } from './jobs/inboundPoll.cron.js';
+import { activityRouter } from './routes/activity.routes.js';
 import { agentRouter } from './routes/agent.routes.js';
 import { authPublicRouter, authProtectedRouter } from './routes/auth.routes.js';
 import { devRouter } from './routes/dev.routes.js';
@@ -137,6 +138,7 @@ export function createApp(): express.Express {
   app.use('/api/agent', agentRouter);
   app.use('/api/settings', settingsRouter);
   app.use('/api/linkedin-queue', linkedinQueueRouter);
+  app.use('/api/activity', activityRouter);
   // Protected OAuth endpoints (list/disconnect) — normal dashboard XHR.
   app.use('/api/auth', authProtectedRouter);
   // R&D only — compare OpenAI vs Gemini discovery adapters side-by-side.

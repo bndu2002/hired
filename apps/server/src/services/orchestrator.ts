@@ -111,130 +111,161 @@ export async function runDiscoverPhase(
   const run = await runRepo.createRun({ jobId: job.id, channels: input.channels });
   logger.info({ runId: run.id, jobId: job.id, companyName: job.companyName }, 'run created');
 
-  // 4. Discovery via the fallback chain. Registry handles exhausted / failing
-  //    adapters internally.
-  const discoveryInputFields: {
-    companyName: string;
-    jobTitle: string;
-    jobDescription?: string;
-    limit: number;
-  } = {
-    companyName: job.companyName,
-    jobTitle: job.jobTitle,
-    limit: MAX_CONTACTS_PER_RUN,
-  };
-  if (job.jobDescription) {
-    discoveryInputFields.jobDescription = job.jobDescription;
-  }
+  // Everything from here on happens "inside the run". The explicit
+  // early-return paths below (`no_discovery`) call `updateStatus`
+  // themselves and return normally — the catch doesn't fire. The try
+  // is a defensive wrapper for UNEXPECTED throws (adapter crash outside
+  // the registry's catch, DB blip, network error inside Promise.all).
+  // Without it, an uncaught throw leaves the run row IN_PROGRESS
+  // forever and the dashboard shows a ghost. Mark FAILED + re-throw so
+  // the caller still sees the real error.
+  try {
+    // 4. Discovery via the fallback chain. Registry handles exhausted / failing
+    //    adapters internally.
+    const discoveryInputFields: {
+      companyName: string;
+      jobTitle: string;
+      jobDescription?: string;
+      limit: number;
+    } = {
+      companyName: job.companyName,
+      jobTitle: job.jobTitle,
+      limit: MAX_CONTACTS_PER_RUN,
+    };
+    if (job.jobDescription) {
+      discoveryInputFields.jobDescription = job.jobDescription;
+    }
 
-  const discovery = await discoveryRegistry.resolve<CandidateContact[]>(
-    (adapter) => adapter.discover(discoveryInputFields),
-  );
-
-  if (!discovery) {
-    await runRepo.updateStatus(run.id, 'FAILED');
-    logger.warn({ runId: run.id }, 'discovery: all adapters failed');
-    return { status: 'no_discovery', runId: run.id, reason: 'all_adapters_failed' };
-  }
-
-  if (discovery.result.length === 0) {
-    await runRepo.updateStatus(run.id, 'COMPLETED');
-    logger.info(
-      { runId: run.id, via: discovery.via },
-      'discovery: adapter returned no candidates',
+    const discovery = await discoveryRegistry.resolve<CandidateContact[]>(
+      (adapter) => adapter.discover(discoveryInputFields),
     );
-    return { status: 'no_discovery', runId: run.id, reason: 'empty_results' };
-  }
 
-  // 5. Cross-run dedup lookup. Done BEFORE insert so we're asking: "which
-  //    of these candidates have we actually reached out to in a prior run?"
-  //    The repo query filters out PENDING-only rows (discovered-never-sent),
-  //    so just-discovered-again counts as fresh.
-  const candidateUrls = discovery.result
-    .map((c) => c.linkedinUrl)
-    .filter((url): url is string => Boolean(url));
-  const previouslyContactedByUrl =
-    await contactRepo.findPreviousByLinkedinUrls(candidateUrls);
+    if (!discovery) {
+      await runRepo.updateStatus(run.id, 'FAILED');
+      logger.warn({ runId: run.id }, 'discovery: all adapters failed');
+      return { status: 'no_discovery', runId: run.id, reason: 'all_adapters_failed' };
+    }
 
-  // 6. Insert the contact rows in bulk.
-  const contacts = await contactRepo.createMany(
-    run.id,
-    discovery.result.slice(0, MAX_CONTACTS_PER_RUN).map((c) => {
-      const input: contactRepo.CreateContactInput = {
-        name: c.name,
-        discoveredVia: discovery.via,
-      };
-      if (c.title) input.title = c.title;
-      if (c.tenureHint) input.tenureHint = c.tenureHint;
-      if (c.linkedinUrl) input.linkedinUrl = c.linkedinUrl;
-      return input;
-    }),
-  );
+    if (discovery.result.length === 0) {
+      await runRepo.updateStatus(run.id, 'COMPLETED');
+      logger.info(
+        { runId: run.id, via: discovery.via },
+        'discovery: adapter returned no candidates',
+      );
+      return { status: 'no_discovery', runId: run.id, reason: 'empty_results' };
+    }
 
-  // 7. Append `contact_discovered` events — one per contact. D3 append-only.
-  await Promise.all(
-    contacts.map((contact) =>
-      eventRepo.append(
-        contact.id,
-        makeEvent('contact_discovered', { discoveredVia: discovery.via }),
-      ),
-    ),
-  );
+    // 5. Cross-run dedup lookup. Done BEFORE insert so we're asking: "which
+    //    of these candidates have we actually reached out to in a prior run?"
+    //    The repo query filters out PENDING-only rows (discovered-never-sent),
+    //    so just-discovered-again counts as fresh.
+    const candidateUrls = discovery.result
+      .map((c) => c.linkedinUrl)
+      .filter((url): url is string => Boolean(url));
+    const previouslyContactedByUrl =
+      await contactRepo.findPreviousByLinkedinUrls(candidateUrls);
 
-  // 8. Email resolution — only when the user asked for gmail (saves credits).
-  //    Runs the finder registry per contact. D2 is enforced inside the finders
-  //    themselves (Snov's internal verification OR PatternHeuristicFinder's
-  //    use of our verifier), so the orchestrator trusts their verdict.
-  const emailEligible =
-    input.channels === 'gmail' || input.channels === 'both';
-  if (emailEligible) {
+    // 6. Insert the contact rows in bulk.
+    const contacts = await contactRepo.createMany(
+      run.id,
+      discovery.result.slice(0, MAX_CONTACTS_PER_RUN).map((c) => {
+        const input: contactRepo.CreateContactInput = {
+          name: c.name,
+          discoveredVia: discovery.via,
+        };
+        if (c.title) input.title = c.title;
+        if (c.tenureHint) input.tenureHint = c.tenureHint;
+        if (c.linkedinUrl) input.linkedinUrl = c.linkedinUrl;
+        return input;
+      }),
+    );
+
+    // 7. Append `contact_discovered` events — one per contact. D3 append-only.
     await Promise.all(
-      contacts.map((contact) => resolveEmailForContact(contact, job)),
+      contacts.map((contact) =>
+        eventRepo.append(
+          contact.id,
+          makeEvent('contact_discovered', { discoveredVia: discovery.via }),
+        ),
+      ),
     );
-  }
 
-  // 9. Re-fetch contacts after email resolution so the returned view reflects
-  //    whatever updates landed. Cheap (one query); keeps the data path linear.
-  const resolvedContacts = emailEligible
-    ? await contactRepo.listByRun(run.id)
-    : contacts;
+    // 8. Email resolution — only when the user asked for gmail (saves credits).
+    //    Runs the finder registry per contact. D2 is enforced inside the finders
+    //    themselves (Snov's internal verification OR PatternHeuristicFinder's
+    //    use of our verifier), so the orchestrator trusts their verdict.
+    const emailEligible =
+      input.channels === 'gmail' || input.channels === 'both';
+    if (emailEligible) {
+      await Promise.all(
+        contacts.map((contact) => resolveEmailForContact(contact, job)),
+      );
+    }
 
-  // 10. Build the enriched view attaching previous-contact info to each.
-  const contactViews: DiscoveredContactView[] = resolvedContacts.map((contact) => ({
-    contact,
-    previouslyContacted:
-      (contact.linkedinUrl &&
-        previouslyContactedByUrl.get(contact.linkedinUrl)) ||
-      null,
-  }));
+    // 9. Re-fetch contacts after email resolution so the returned view reflects
+    //    whatever updates landed. Cheap (one query); keeps the data path linear.
+    const resolvedContacts = emailEligible
+      ? await contactRepo.listByRun(run.id)
+      : contacts;
 
-  // 11. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
-  //     adds a DISPATCH_PENDING state between discovery and send.)
-  await runRepo.updateStatus(run.id, 'COMPLETED');
+    // 10. Build the enriched view attaching previous-contact info to each.
+    const contactViews: DiscoveredContactView[] = resolvedContacts.map((contact) => ({
+      contact,
+      previouslyContacted:
+        (contact.linkedinUrl &&
+          previouslyContactedByUrl.get(contact.linkedinUrl)) ||
+        null,
+    }));
 
-  const previouslyContactedCount = contactViews.filter(
-    (v) => v.previouslyContacted !== null,
-  ).length;
-  const resolvedEmailCount = contactViews.filter(
-    (v) => v.contact.email !== null && v.contact.emailVerified,
-  ).length;
-  logger.info(
-    {
+    // 11. Mark the run completed for Phase A. (Slice 2 will revisit when Phase B
+    //     adds a DISPATCH_PENDING state between discovery and send.)
+    await runRepo.updateStatus(run.id, 'COMPLETED');
+
+    const previouslyContactedCount = contactViews.filter(
+      (v) => v.previouslyContacted !== null,
+    ).length;
+    const resolvedEmailCount = contactViews.filter(
+      (v) => v.contact.email !== null && v.contact.emailVerified,
+    ).length;
+    logger.info(
+      {
+        runId: run.id,
+        contactCount: contacts.length,
+        previouslyContactedCount,
+        resolvedEmailCount,
+        via: discovery.via,
+      },
+      'discovery phase completed',
+    );
+
+    return {
+      status: 'ok',
       runId: run.id,
-      contactCount: contacts.length,
-      previouslyContactedCount,
-      resolvedEmailCount,
-      via: discovery.via,
-    },
-    'discovery phase completed',
-  );
-
-  return {
-    status: 'ok',
-    runId: run.id,
-    contacts: contactViews,
-    discoveredVia: discovery.via,
-  };
+      contacts: contactViews,
+      discoveredVia: discovery.via,
+    };
+  } catch (err) {
+    // Best-effort: mark FAILED so the dashboard doesn't show a stuck
+    // IN_PROGRESS row. Nested .catch so a mark-failure doesn't shadow
+    // the real error (which we still re-throw below).
+    await runRepo.updateStatus(run.id, 'FAILED').catch((markErr) => {
+      logger.error(
+        {
+          runId: run.id,
+          err: markErr instanceof Error ? markErr.message : String(markErr),
+        },
+        'runDiscoverPhase: failed to mark run FAILED after error',
+      );
+    });
+    logger.error(
+      {
+        runId: run.id,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      'runDiscoverPhase: uncaught error — marked run FAILED',
+    );
+    throw err;
+  }
 }
 
 // ─── Phase B — send / draft ─────────────────────────────────────────────────
